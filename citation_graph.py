@@ -2,15 +2,23 @@ from pybliometrics.scopus.exception import Scopus404Error
 from pybliometrics.scopus import AbstractRetrieval
 from collections import namedtuple
 import time
+import re
+import os
+import csv
+
+import threading
+import pyperclip
 
 
 # Abstract Retrieval, 10,000 per week, 9 per sec.
 
 class CitationGraph:
-    def __init__(self, doi_lst, ignore_lst=[], max_age=30, min_gap=0.1):
+    def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_gap=0.1):
+        if ignore_lst is None:
+            ignore_lst = []
         assert max_age > 7
-        self.max_age = max_age
-        self.curr_refs = dict()  # entry: ref.id: [Reference, local_id_set]
+        self.max_age = max_age  # manually increase age when the internet is not available and you want to read old data
+        self.curr_refs = dict()  # entry: ref.id: [Reference, (local_id_ref_pos)_set]
 
         self.doi_list = []
         for doi in doi_lst:
@@ -29,22 +37,33 @@ class CitationGraph:
         self.t_last = time.time()
         self.q_gap = min_gap
 
+        # change accordingly when the corresponding part in pybliometrics changes
+        # as of v3.3.1-dev5
+        fields = 'position id doi title authors authors_auid ' \
+                 'authors_affiliationid sourcetitle publicationyear coverDate ' \
+                 'volume issue first last citedbycount type fulltext'
+        self.OldRefTup = namedtuple('Reference', fields)
+
+        self.cache_ref_dir = "cache_bibliography"
+        self.cache_ref_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], self.cache_ref_dir)
+        os.makedirs(self.cache_ref_dir, exist_ok=True)
+
     def print_curr_papers(self):
         """
         Sort current papers by citations
         :return:
         """
-        tab_head = ["#", "cites", " " * 50 + "title", "cover date", " " * 15 + "source title abbr",
-                    " " * 5 + "last author",
-                    " " * 25 + "first affil",
-                    " " * 25 + "doi"]
-        col_gap = []
-        fmt = ""
-        for hd in tab_head:
-            col_gap.append(4 * (len(hd) // 4 + 1))
-            fmt += "%%%ds | " % col_gap[-1]
+        tab_head = ["#", "cites", "title", "cover date", "source title abbr",
+                    "last author",
+                    "first affil",
+                    "doi"]
 
-        dat = [(i, j,) for i, j in enumerate(self.v_full) if j]
+        col_widths = [6, 6, 60, 12, 44, 20, 44, 32]
+        assert len(col_widths) == len(tab_head)
+
+        fmt = "".join([" %%%d.%ds |" % (cw, cw) for cw in col_widths])
+
+        qpapers = [(i, j,) for i, j in enumerate(self.v_full) if j]
 
         for case in range(2):
             if case == 0:
@@ -57,60 +76,249 @@ class CitationGraph:
                 print("\n" + "#" * 32, "Query papers (Most cited)")
                 print(fmt % tuple(tab_head))
 
-                dat.sort(key=lambda ent: int(ent[1].citedby_count) if ent[1].citedby_count else 0, reverse=True)
+                qpapers.sort(key=lambda ent: int(ent[1].citedby_count) if ent[1].citedby_count else 0, reverse=True)
             else:
                 continue
 
-            for itm in dat:
-                print(fmt % (str(" %2dr" % itm[0])[:col_gap[0]],
-                             str(itm[1].citedby_count)[:col_gap[1]],
-                             str(itm[1].title)[:col_gap[2]],
-                             str(itm[1].coverDate)[:col_gap[3]],
-                             str(itm[1].sourcetitle_abbreviation)[:col_gap[4]],
-                             "" if len(itm[1].authors) < 1 else str(itm[1].authors[-1].indexed_name)[:col_gap[5]],
-                             "" if len(itm[1].affiliation) < 1 else str(itm[1].affiliation[0].name)[:col_gap[6]],
-                             itm[1].doi[:col_gap[7]] if itm[1].doi else ""
+            for itm in qpapers:
+                au1 = '-'
+                af0 = '-'
+                if itm[1].authors:
+                    if len(itm[1].authors) > 0:
+                        au1 = str(itm[1].authors[-1].indexed_name)
+                if itm[1].affiliation:
+                    if len(itm[1].affiliation) > 0:
+                        af0 = str(itm[1].affiliation[0].name)
+                print(fmt % (str(" %2d:" % itm[0]),
+                             str(itm[1].citedby_count),
+                             str(itm[1].title),
+                             str(itm[1].coverDate),
+                             str(itm[1].sourcetitle_abbreviation),
+                             au1,
+                             af0,
+                             itm[1].doi or ""
                              ))
 
-    def print_refs(self):
+    @staticmethod
+    def simplify_source_title(src):
+        src += " "
+        abbr_list = [
+            ("Transactions", "Trans."),
+            ("International", "Int."),
+            ("Journal", "J."),
+            (r"Robot[ics]*?\s", "Robot. "),
+            ("Research", "Res."),
+            ("Proceedings?", "Proc."),
+            ("Conferences?", "Conf."),
+            ("Intelligent", "Intell."),
+            (r"Systems?", "Syst."),
+            ("Science", "Sci."),
+            ("Automation", "Autom."),
+            ("Letters?", "Lett."),
+            (r" \- ", " "),
+            (r"Comput\w+?\s", "Comput. "),
+            (r"Europ\w+?\s", "Eur. ")
+        ]
+
+        for div in abbr_list:
+            src = re.sub(div[0], div[1], src)
+        return src.strip()
+
+    @staticmethod
+    def parse_ref_two_authors(aunms, auids):
+        au1 = au2 = '-'
+        if aunms:
+            aunms_raw = [x.strip() for x in aunms.split(";")]
+            auids_raw = [str(j) for j in range(len(aunms_raw))]
+
+            if auids:
+                auids_raw = [x.strip() for x in auids.split(";")]
+                assert len(aunms_raw) == len(auids_raw)
+
+            auid_set = set()
+            authors = []
+            for aa in range(len(aunms_raw)):
+                if auids_raw[aa] not in auid_set:
+                    authors.append(aunms_raw[aa])
+                    auid_set.add(auids_raw[aa])
+
+            if len(authors) > 1:
+                au1 = authors[0]
+                au2 = authors[-1]
+            elif len(authors) == 1:
+                au1 = authors[0]
+        return au1, au2
+
+    def print_refs(self, show_ref_pos=False, min_refs=1):
+        assert min_refs > 0
         num_ignored = 0
 
-        tab_head = ["#", "local cites", "total cites", " " * 50 + "title", "pub year",
-                    " " * 30 + "source title", " " * 5 + "scopus_id"]
-        col_gap = []
-        fmt = ""
-        for hd in tab_head:
-            col_gap.append(4 * (len(hd) // 4 + 1))
-            fmt += "%%%ds | " % col_gap[-1]
+        tab_head = ["#", "local cites", "total cites", "title", "year",
+                    "first author", "last author",
+                    "source title", "scopus_id"]
 
-        print("\n" + "#" * 32, "Cited papers")
+        col_widths = [6, 12, 12, 60, 4, 20, 20, 44, 12]
+        assert len(col_widths) == len(tab_head)
+
+        fmt = "".join([" %%%d.%ds |" % (cw, cw) for cw in col_widths])
+
+        print("\n" + "#" * 32, "Cited papers by the group of %d:" % len(self.v_ref))
         print(fmt % tuple(tab_head))
 
         dat = []
-        for itm in self.curr_refs.items():
-            if itm[1]:
-                dat.append(itm[1])
-                if itm[1][0].id and itm[1][0].id in self.ignored_refs:
+        for pair in self.curr_refs.items():
+            if pair[1]:
+                dat.append(pair[1])  # pair = (ref.id, [Reference, local_id_refpos_set])
+                if pair[1][0].id and pair[1][0].id in self.ignored_refs:
                     num_ignored += 1
 
         dat.sort(key=lambda x: (-len(x[1]) if x[0].id in self.ignored_refs else len(x[1]),
-                                int(x[0].citedbycount) if x[0].citedbycount else 0,),
+                                int(x[0].citedbycount) if x[0].citedbycount and str(
+                                    x[0].citedbycount).isdigit() else 0,),
                  reverse=True)
 
+        ref_cnt = min_refs
         for i, itm in enumerate(dat):
+            if 0 < len(itm[1]) < ref_cnt:
+                continue
+
             if i == len(dat) - num_ignored:
                 print("-" * 32, "Ignored references:")
-            print(fmt % (str(i + 1)[:col_gap[0]],
-                         str(len(itm[1]))[:col_gap[1]],
-                         str(itm[0].citedbycount or '-')[:col_gap[2]],
-                         str(itm[0].title)[:col_gap[3]],
-                         str(itm[0].publicationyear[:4] if itm[0].publicationyear else "-")[:col_gap[4]],
-                         str(itm[0].sourcetitle)[:col_gap[5]],
-                         str(itm[0].id)[:col_gap[6]],
+                ref_cnt = -1
+
+            au1, au2 = self.parse_ref_two_authors(itm[0].authors, itm[0].authors_auid)
+
+            print(fmt % (str(i + 1),
+                         str(len(itm[1])),
+                         str(itm[0].citedbycount) if str(itm[0].citedbycount).isdigit() else '-',
+                         str(itm[0].title),
+                         str(itm[0].coverDate[:4] if itm[0].coverDate else "-"),
+                         au1,
+                         au2,
+                         self.simplify_source_title(str(itm[0].sourcetitle)),
+                         str(itm[0].id),
                          ), end='\t')
             for j in sorted(list(itm[1])):
-                print(" %2dr" % j, end=",")
+                if show_ref_pos:
+                    print(" %2d:[%d]" % (j[0], int(j[1])), end=",")  # case 2: show ref position
+                else:
+                    print(" %2d:" % (j[0],), end=",")  # case 1: do not show reference position in each paper
             print()
+
+    # Only supports doi as qid
+    def load_bibliography_from_file(self, q_id):
+        cache_name = q_id.replace('/', '_') + ".csv"
+        cache_path = os.path.join(self.cache_ref_dir, cache_name)
+
+        ret = []
+        with open(cache_path, 'r', encoding="utf-8") as csvfile:
+            reader = csv.reader(csvfile, delimiter=';', quotechar='\"')
+            title_ok = False
+            for ref in reader:
+                if len(ref) != len(self.OldRefTup._fields):
+                    print("[!] `Reference` entry length inconsistent")
+                    return []
+                if not title_ok:
+                    for i, itm in enumerate(ref):
+                        if itm != self.OldRefTup._fields[i]:
+                            print("[!] `Reference` structure inconsistent")
+                            return []
+                    title_ok = True
+                    continue
+
+                tmp = self.OldRefTup(*ref)
+                ret.append(tmp)
+            return ret
+
+    # TODO: save especially reference list data to a well parsed form so that we can use across platform without
+    #  internet connection
+    # Only supports doi as qid
+    def save_bibliography_to_file(self, ref_lst, q_id):
+        """
+        Check if a historical record exists and not spires
+        :param ref_lst:
+        :param q_id:
+        :return:
+        """
+        if not ref_lst:
+            return
+
+        cache_name = q_id.replace('/', '_') + ".csv"
+        cache_path = os.path.join(self.cache_ref_dir, cache_name)
+
+        with open(cache_path, 'w', newline='', encoding="utf-8") as csvfile:
+            csvw = csv.writer(csvfile, delimiter=';', quotechar='\"', quoting=csv.QUOTE_MINIMAL)
+            csvw.writerow(list(ref_lst[0]._fields))
+            for ref in ref_lst:
+                csvw.writerow(list(ref))
+
+    def print_one_bib_entry(self, fmt, ref):
+        au1, au2 = self.parse_ref_two_authors(ref.authors, ref.authors_auid)
+        print(fmt % (
+            "[%s]" % str(ref.position),
+            str(ref.citedbycount or '-'),
+            str(ref.title),
+            str(ref.coverDate[:4] if ref.coverDate else "-"),
+            au1,
+            au2,
+            self.simplify_source_title(str(ref.sourcetitle)),
+            str(ref.id)
+        ))
+
+    def print_paper_bibliography(self, ii):
+        """
+        Print the bib of one paper from the input doi list
+        :param ii:
+        :return:
+        """
+        assert len(self.doi_list) == len(self.v_ref)
+        assert len(self.doi_list) == len(self.v_full)
+        assert 0 <= ii < len(self.v_ref)
+        assert self.v_ref[ii]  # not none
+
+        print("\n" + "#" * 32, "Items cited by \"%s\":" % str(self.v_full[ii].title))
+        tab_head = ["[#]", "total cites", "title", "year",
+                    "first author", "last author",
+                    "source title", "scopus_id"]
+        col_widths = [6, 12, 60, 4, 20, 20, 44, 12]
+        assert len(col_widths) == len(tab_head)
+
+        fmt = "".join([" %%%d.%ds |" % (cw, cw) for cw in col_widths])
+        print(fmt % tuple(tab_head))
+
+        for ref in self.v_ref[ii]:
+            self.print_one_bib_entry(fmt, ref)
+
+    def live_bib_lookup(self, ii):
+        def cbk(clipboard_content):
+            res = re.search(r"\d+", clipboard_content)
+            if res:
+                num = int(res.group())
+                if 0 < num < 1000:
+                    print("Found number %d in: `%s`" % (num, str(clipboard_content)))
+                    return num
+            return -1
+
+        assert len(self.doi_list) == len(self.v_ref)
+        assert len(self.doi_list) == len(self.v_full)
+        assert 0 <= ii < len(self.v_ref)
+        assert self.v_ref[ii]  # not none
+
+        max_ref = len(self.v_ref[ii])
+
+        col_widths = [6, 12, 60, 4, 20, 20, 44, 12]
+        fmt = "".join([" %%%d.%ds |" % (cw, cw) for cw in col_widths])
+
+        recent_value = ""
+        while True:
+            tmp_value = pyperclip.paste()
+            if tmp_value != recent_value:
+                print(recent_value, tmp_value)
+                recent_value = tmp_value
+                pos = cbk(recent_value)
+                if 0 < pos <= max_ref:
+                    self.print_one_bib_entry(fmt, self.v_ref[ii][pos - 1])
+            time.sleep(0.5)
 
     def get_bibliography_info(self):
         # query FULL data
@@ -140,13 +348,37 @@ class CitationGraph:
                 self.v_full.append(None)
 
         # query REF data
+        # # check cache
+        cached_ref_names = set()
+        for curr_root, dirs, files in os.walk(self.cache_ref_dir):
+            for file in files:
+                cached_ref_names.add(file.replace('/', '_'))
+
+        # # query
         for i, itm in enumerate(self.doi_list):
             try:
                 all_curr_refs = []
                 start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
                 need_refresh = False
+                need_pyblio_req = True
 
-                while True:
+                # test if corresponding FULL is successful
+                if itm in self.fail_set:
+                    raise ValueError("FULL view already failed.")
+
+                # try to read from db
+                f_name = itm.replace('/', '_') + ".csv"
+                if f_name in cached_ref_names:
+                    t_cache = os.path.getmtime(os.path.join(self.cache_ref_dir, f_name))
+                    d_t = time.time() - t_cache
+                    if (d_t - t_cache) / 86400 < self.max_age:
+                        all_curr_refs = self.load_bibliography_from_file(itm)
+                        if all_curr_refs:  # if load query successful
+                            need_pyblio_req = False
+                            print("[+] Load REF %d/%d" % (i + 1, len(self.doi_list)))
+
+                # if not exist in db, run the pyblio routine
+                while need_pyblio_req:
                     t_ready = time.time()
                     if t_ready - self.t_last < self.q_gap:
                         time.sleep(self.q_gap)
@@ -160,6 +392,9 @@ class CitationGraph:
                         self.t_last = time.time()
                         print("[+] Remaining quota: %s " % quota_rem)
 
+                    if not ab.references:
+                        raise ValueError("[!] Empty references!")
+
                     if len(ab.references) == ab.refcount:
                         all_curr_refs += ab.references
                         break
@@ -172,13 +407,16 @@ class CitationGraph:
                     else:
                         need_refresh = True
 
+                if need_pyblio_req:
+                    self.save_bibliography_to_file(all_curr_refs, itm)
+
                 for ref in all_curr_refs:  # build a dict of the works referred.
                     dict_ent = self.curr_refs.get(ref.id)
                     if dict_ent:
                         # parent id is not available in REF view:
-                        dict_ent[1].add(i)  # TODO: should we enforce length?
+                        dict_ent[1].add((i, ref.position,))  # TODO: should we enforce length?
                     else:
-                        self.curr_refs[ref.id] = [ref, {i, }]
+                        self.curr_refs[ref.id] = [ref, {(i, ref.position,), }]
 
                 self.v_ref.append(all_curr_refs)
 
@@ -186,13 +424,17 @@ class CitationGraph:
                 print("[!] REF view of DOI: ", itm, "cannot be found!")
                 self.fail_set.add(itm)
                 self.v_ref.append(None)
+            except ValueError as e2:
+                print("[!] REF view of DOI: ", itm, e2)
+                self.fail_set.add(itm)
+                self.v_ref.append(None)
             except Exception as e:
                 print("[!] Unhandled exception:", e)
                 self.fail_set.add(itm)
                 self.v_ref.append(None)
+                raise e
 
-        # plot the reference info (local citation count, total citation count, queried named-tuples)
-        pass
+        print(self.fail_set)
 
 
 if __name__ == "__main__":
@@ -214,14 +456,20 @@ if __name__ == "__main__":
         "10.1109/IROS.2018.8594007",
         "10.1109/ICRA.2013.6630556",
         "10.1109/ECMR.2013.6698835",
+        "10.1109/TRO.2016.2624754"
     ]
     ignored = ["84871676827",
                "58249138093",
                "84856742278",
+               "33750968800"
                ]
 
     cg = CitationGraph(dois, ignored)
 
     cg.get_bibliography_info()
     cg.print_curr_papers()
-    cg.print_refs()
+    cg.print_refs(show_ref_pos=True, min_refs=1)
+
+    cg.print_paper_bibliography(11)
+
+    # cg.live_bib_lookup(11)
