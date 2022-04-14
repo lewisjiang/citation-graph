@@ -20,9 +20,10 @@ class CitationGraph:
         self.max_age = max_age  # manually increase age when the internet is not available and you want to read old data
         self.curr_refs = dict()  # entry: ref.id: [Reference, (local_id_ref_pos)_set]
 
-        self.doi_list = []
+        self.input_doi = []
         for doi in doi_lst:
-            self.doi_list.append(doi.strip())  # lower creates a new profile, but the online query is case insensitive.
+            self.input_doi.append(doi.strip())  # lower creates a new profile, but the online query is case insensitive.
+        self.input_scopus_id = set()
 
         self.ignored_refs = set()  # a set of scopus_id strings that we wish to block
         for i in ignore_lst:
@@ -186,10 +187,14 @@ class CitationGraph:
                 print("-" * 32, "Ignored references:")
                 ref_cnt = -1
 
+            local_sign = ""
+            if str(itm[0].id) in self.input_scopus_id:  # if the referred paper is an input query paper
+                local_sign = "*"
+
             au1, au2 = self.parse_ref_two_authors(itm[0].authors, itm[0].authors_auid)
 
             print(fmt % (str(i + 1),
-                         str(len(itm[1])),
+                         local_sign + str(len(itm[1])),
                          str(itm[0].citedbycount) if str(itm[0].citedbycount).isdigit() else '-',
                          str(itm[0].title),
                          str(itm[0].coverDate[:4] if itm[0].coverDate else "-"),
@@ -271,8 +276,8 @@ class CitationGraph:
         :param ii:
         :return:
         """
-        assert len(self.doi_list) == len(self.v_ref)
-        assert len(self.doi_list) == len(self.v_full)
+        assert len(self.input_doi) == len(self.v_ref)
+        assert len(self.input_doi) == len(self.v_full)
         assert 0 <= ii < len(self.v_ref)
         assert self.v_ref[ii]  # not none
 
@@ -299,8 +304,8 @@ class CitationGraph:
                     return num
             return -1
 
-        assert len(self.doi_list) == len(self.v_ref)
-        assert len(self.doi_list) == len(self.v_full)
+        assert len(self.input_doi) == len(self.v_ref)
+        assert len(self.input_doi) == len(self.v_full)
         assert 0 <= ii < len(self.v_ref)
         assert self.v_ref[ii]  # not none
 
@@ -322,13 +327,13 @@ class CitationGraph:
 
     def get_bibliography_info(self):
         # query FULL data
-        for i, itm in enumerate(self.doi_list):
+        for i, itm in enumerate(self.input_doi):
             try:
                 t_ready = time.time()
                 if t_ready - self.t_last < self.q_gap:
                     time.sleep(self.q_gap)
 
-                print("[+] Query FULL %d/%d" % (i + 1, len(self.doi_list)))
+                print("[+] Query FULL %d/%d" % (i + 1, len(self.input_doi)))
                 ab = AbstractRetrieval(itm, view='FULL', refresh=self.max_age)
                 quota_rem = ab.get_key_remaining_quota()
 
@@ -337,6 +342,7 @@ class CitationGraph:
                     print("[+] Remaining quota: %s " % quota_rem)
 
                 self.v_full.append(ab)
+                self.input_scopus_id.add(ab.eid[7:])
 
             except Scopus404Error as e1:
                 print("[!] FULL view of DOI: ", itm, "cannot be found!")
@@ -355,7 +361,7 @@ class CitationGraph:
                 cached_ref_names.add(file.replace('/', '_'))
 
         # # query
-        for i, itm in enumerate(self.doi_list):
+        for i, itm in enumerate(self.input_doi):
             try:
                 all_curr_refs = []
                 start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
@@ -375,7 +381,7 @@ class CitationGraph:
                         all_curr_refs = self.load_bibliography_from_file(itm)
                         if all_curr_refs:  # if load query successful
                             need_pyblio_req = False
-                            print("[+] Load REF %d/%d" % (i + 1, len(self.doi_list)))
+                            print("[+] Load REF %d/%d" % (i + 1, len(self.input_doi)))
 
                 # if not exist in db, run the pyblio routine
                 while need_pyblio_req:
@@ -383,7 +389,7 @@ class CitationGraph:
                     if t_ready - self.t_last < self.q_gap:
                         time.sleep(self.q_gap)
 
-                    print("[+] Query REF %d/%d" % (i + 1, len(self.doi_list)))
+                    print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
                     ab = AbstractRetrieval(itm, view='REF', refresh=True if need_refresh else self.max_age,
                                            startref=start_ref)
 
@@ -434,7 +440,11 @@ class CitationGraph:
                 self.v_ref.append(None)
                 raise e
 
-        print(self.fail_set)
+        print("#" * 32 + " Failed:")
+        for i, ref in enumerate(self.v_ref):
+            if not ref:
+                print("%4d | %32s |" % (i, self.input_doi[i]))
+
 
 
 if __name__ == "__main__":
