@@ -1,10 +1,12 @@
 from pybliometrics.scopus.exception import Scopus404Error
 from pybliometrics.scopus import AbstractRetrieval
+from pybliometrics.scopus.utils.constants import BASE_PATH
 from collections import namedtuple
 import time
 import re
 import os
 import csv
+import datetime
 
 import threading
 import pyperclip
@@ -45,15 +47,80 @@ class CitationGraph:
                  'volume issue first last citedbycount type fulltext'
         self.OldRefTup = namedtuple('Reference', fields)
 
-        self.cache_ref_dir = "cache_bibliography"
-        self.cache_ref_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], self.cache_ref_dir)
+        self.cache_ref_dir = os.path.join(BASE_PATH, "my_parsed_bib_cache")
         os.makedirs(self.cache_ref_dir, exist_ok=True)
 
-    def print_curr_papers(self):
+    @staticmethod
+    def create_obsidian_note_from_full(a_full_itm, md_dir):
+        """
+
+        :param md_dir:
+        :param a_full_itm:
+        :return:
+        """
+        # current obsidian format: 2022-04-23
+        """
+        ---
+        title: <% tp.file.title %>
+        date: <% tp.file.creation_date("YYYY-MM-DD HH:mm:ss") %>
+        updated: <% tp.file.creation_date("YYYY-MM-D HH:mm:ss") %>
+        tags: [paper, meta_incomplete, preprint]
+        aliases: []
+
+        full_title:
+        status: unread
+        doi: 
+        scopus_id: 
+        citedby: 
+        authors: []
+        venue:
+        year:
+        ---
+        """
+
+        authors = []
+        authors_id_set = set()
+        for au in a_full_itm.authors:
+            if au.auid in authors_id_set:
+                continue
+            authors_id_set.add(au.auid)
+            authors.append("%s, %s" % (str(au.surname), str(au.given_name)))
+
+        key_val = [
+            "title:", "\"" + (a_full_itm.title or "Unknown" + str(time.time())[-4:]).strip() + "\"",
+            "date:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "updated:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "tags:", "[paper, meta_incomplete, preprint]",
+            "aliases:", "[]",
+            "", "",
+            "full_title:", "\"" + a_full_itm.title + "\"" or "",
+            "status:", "unread",
+            "doi:", "\"" + a_full_itm.doi + "\"" or "",
+            "scopus_id:", a_full_itm.eid[7:] if a_full_itm.eid else "",
+            "citedby:", str(a_full_itm.citedby_count),
+            "authors:", str(authors),
+            "venue:", "\"" + str(a_full_itm.sourcetitle_abbreviation) + "\"",
+            "year:", str(a_full_itm.coverDate[:4] if a_full_itm.coverDate else ""),
+        ]
+        lines = [" ".join(key_val[2 * i: 2 * i + 2]) for i in range(len(key_val) // 2)]
+
+        md_path = os.path.join(md_dir, "".join(x for x in key_val[1] if (x.isalnum() or x in "._- ")) + ".md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write("---\n")
+            for line in lines:
+                f.write(line + "\n")
+            f.write("---\n\n")
+            fields = ["## Overview", "## Past/Related works", "## Contribution/Problems solved", "## Main methods",
+                      "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2022-04-23
+            for fie in fields:
+                f.write(fie + "\n\n")
+
+    def print_curr_papers(self, md_dir=""):
         """
         Sort current papers by citations
         :return:
         """
+
         tab_head = ["#", "cites", "title", "cover date", "source title abbr",
                     "last author",
                     "first affil",
@@ -65,6 +132,11 @@ class CitationGraph:
         fmt = "".join([" %%%d.%ds |" % (cw, cw) for cw in col_widths])
 
         qpapers = [(i, j,) for i, j in enumerate(self.v_full) if j]
+
+        if md_dir:  # if create obsidian note templ at the same time.
+            os.makedirs(md_dir, exist_ok=True)
+            for qp in qpapers:
+                CitationGraph.create_obsidian_note_from_full(qp[1], md_dir)
 
         for case in range(2):
             if case == 0:
@@ -221,12 +293,12 @@ class CitationGraph:
             title_ok = False
             for ref in reader:
                 if len(ref) != len(self.OldRefTup._fields):
-                    print("[!] `Reference` entry length inconsistent")
+                    print(" !  `Reference` entry length inconsistent")  # TODO: should we raise error?
                     return []
                 if not title_ok:
                     for i, itm in enumerate(ref):
                         if itm != self.OldRefTup._fields[i]:
-                            print("[!] `Reference` structure inconsistent")
+                            print(" !  `Reference` structure inconsistent")
                             return []
                     title_ok = True
                     continue
@@ -235,7 +307,7 @@ class CitationGraph:
                 ret.append(tmp)
             return ret
 
-    # TODO: save especially reference list data to a well parsed form so that we can use across platform without
+    # save especially reference list data to a well parsed form so that we can use across platform without
     #  internet connection
     # Only supports doi as qid
     def save_bibliography_to_file(self, ref_lst, q_id):
@@ -256,6 +328,8 @@ class CitationGraph:
             csvw.writerow(list(ref_lst[0]._fields))
             for ref in ref_lst:
                 csvw.writerow(list(ref))
+
+            print("[+] Saved parsed refs for: ", q_id)
 
     def print_one_bib_entry(self, fmt, ref):
         au1, au2 = self.parse_ref_two_authors(ref.authors, ref.authors_auid)
@@ -327,14 +401,14 @@ class CitationGraph:
 
     def get_bibliography_info(self):
         # query FULL data
-        for i, itm in enumerate(self.input_doi):
+        for i, doi in enumerate(self.input_doi):
             try:
                 t_ready = time.time()
                 if t_ready - self.t_last < self.q_gap:
                     time.sleep(self.q_gap)
 
                 print("[+] Query FULL %d/%d" % (i + 1, len(self.input_doi)))
-                ab = AbstractRetrieval(itm, view='FULL', refresh=self.max_age)
+                ab = AbstractRetrieval(doi, view='FULL', refresh=self.max_age)
                 quota_rem = ab.get_key_remaining_quota()
 
                 if quota_rem:  # really queried Scopus instead of reading cache
@@ -345,12 +419,12 @@ class CitationGraph:
                 self.input_scopus_id.add(ab.eid[7:])
 
             except Scopus404Error as e1:
-                print("[!] FULL view of DOI: ", itm, "cannot be found!")
-                self.fail_set.add(itm)
+                print(" !  FULL view of DOI: ", doi, "cannot be found!")
+                self.fail_set.add(doi)
                 self.v_full.append(None)
             except Exception as e:
-                print("[!] Unhandled exception:", e)
-                self.fail_set.add(itm)
+                print(" !  Unhandled exception:", e)
+                self.fail_set.add(doi)
                 self.v_full.append(None)
 
         # query REF data
@@ -361,36 +435,36 @@ class CitationGraph:
                 cached_ref_names.add(file.replace('/', '_'))
 
         # # query
-        for i, itm in enumerate(self.input_doi):
+        for i, doi in enumerate(self.input_doi):
             try:
                 all_curr_refs = []
                 start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
                 need_refresh = False
-                need_pyblio_req = True
+                need_pyblio_func = True
 
                 # test if corresponding FULL is successful
-                if itm in self.fail_set:
+                if doi in self.fail_set:
                     raise ValueError("FULL view already failed.")
 
                 # try to read from db
-                f_name = itm.replace('/', '_') + ".csv"
+                f_name = doi.replace('/', '_') + ".csv"
                 if f_name in cached_ref_names:
                     t_cache = os.path.getmtime(os.path.join(self.cache_ref_dir, f_name))
-                    d_t = time.time() - t_cache
-                    if (d_t - t_cache) / 86400 < self.max_age:
-                        all_curr_refs = self.load_bibliography_from_file(itm)
+                    # The official "REF" file may have expired. But the issue should be minor:
+                    if (time.time() - t_cache) / 86400 < self.max_age:
+                        all_curr_refs = self.load_bibliography_from_file(doi)
                         if all_curr_refs:  # if load query successful
-                            need_pyblio_req = False
+                            need_pyblio_func = False
                             print("[+] Load REF %d/%d" % (i + 1, len(self.input_doi)))
 
                 # if not exist in db, run the pyblio routine
-                while need_pyblio_req:
+                while need_pyblio_func:
                     t_ready = time.time()
                     if t_ready - self.t_last < self.q_gap:
                         time.sleep(self.q_gap)
 
                     print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
-                    ab = AbstractRetrieval(itm, view='REF', refresh=True if need_refresh else self.max_age,
+                    ab = AbstractRetrieval(doi, view='REF', refresh=True if need_refresh else self.max_age,
                                            startref=start_ref)
 
                     quota_rem = ab.get_key_remaining_quota()
@@ -399,7 +473,7 @@ class CitationGraph:
                         print("[+] Remaining quota: %s " % quota_rem)
 
                     if not ab.references:
-                        raise ValueError("[!] Empty references!")
+                        raise ValueError(" !  Empty references!")
 
                     if len(ab.references) == ab.refcount:
                         all_curr_refs += ab.references
@@ -413,8 +487,8 @@ class CitationGraph:
                     else:
                         need_refresh = True
 
-                if need_pyblio_req:
-                    self.save_bibliography_to_file(all_curr_refs, itm)
+                if need_pyblio_func:
+                    self.save_bibliography_to_file(all_curr_refs, doi)
 
                 for ref in all_curr_refs:  # build a dict of the works referred.
                     dict_ent = self.curr_refs.get(ref.id)
@@ -427,16 +501,16 @@ class CitationGraph:
                 self.v_ref.append(all_curr_refs)
 
             except Scopus404Error as e1:
-                print("[!] REF view of DOI: ", itm, "cannot be found!")
-                self.fail_set.add(itm)
+                print(" !  REF view of DOI: ", doi, "cannot be found!")
+                self.fail_set.add(doi)
                 self.v_ref.append(None)
             except ValueError as e2:
-                print("[!] REF view of DOI: ", itm, e2)
-                self.fail_set.add(itm)
+                print(" !  REF view of DOI: ", doi, e2)
+                self.fail_set.add(doi)
                 self.v_ref.append(None)
             except Exception as e:
-                print("[!] Unhandled exception:", e)
-                self.fail_set.add(itm)
+                print(" !  Unhandled exception:", e)
+                self.fail_set.add(doi)
                 self.v_ref.append(None)
                 raise e
 
@@ -444,7 +518,6 @@ class CitationGraph:
         for i, ref in enumerate(self.v_ref):
             if not ref:
                 print("%4d | %32s |" % (i, self.input_doi[i]))
-
 
 
 if __name__ == "__main__":
@@ -477,7 +550,10 @@ if __name__ == "__main__":
     cg = CitationGraph(dois, ignored)
 
     cg.get_bibliography_info()
-    cg.print_curr_papers()
+    
+    obsidian_tmp_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tmp")
+
+    cg.print_curr_papers(md_dir=obsidian_tmp_dir)
     cg.print_refs(show_ref_pos=True, min_refs=1)
 
     cg.print_paper_bibliography(11)
