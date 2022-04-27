@@ -15,7 +15,7 @@ import pyperclip
 # Abstract Retrieval, 10,000 per week, 9 per sec.
 
 class CitationGraph:
-    def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_gap=0.1):
+    def __init__(self, doi_lst, ignore_lst=None, max_age=30):
         if ignore_lst is None:
             ignore_lst = []
         assert max_age > 7
@@ -37,8 +37,6 @@ class CitationGraph:
         self.v_ref = []  # list of list of references
 
         self.fail_set = set()  # failed doi
-        self.t_last = time.time()
-        self.q_gap = min_gap
 
         # change accordingly when the corresponding part in pybliometrics changes
         # as of v3.3.1-dev5
@@ -51,7 +49,7 @@ class CitationGraph:
         os.makedirs(self.cache_ref_dir, exist_ok=True)
 
     @staticmethod
-    def create_obsidian_note_from_full(a_full_itm, md_dir):
+    def create_obsidian_note_from_full(a_full_itm, md_dir, topic):
         """
 
         :param md_dir:
@@ -78,6 +76,27 @@ class CitationGraph:
         ---
         """
 
+        # TODO: check existence by scopus id
+        scopus_id = a_full_itm.eid[7:] if a_full_itm.eid else ""
+        num_lines_to_check = 20
+        for root, dirs, files in os.walk(md_dir):
+            for fname in files:
+                with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
+                    heads = []
+                    try:
+                        for i in range(num_lines_to_check):
+                            heads.append(next(rec))
+                    except StopIteration:
+                        pass
+
+                    for line in heads:
+                        words = line.strip().split(":")
+                        if len(words) > 1 and words[0].strip() == "scopus_id" and words[1].strip() == scopus_id:
+                            print("[-] Paper \"%s\" Obsidian record exists! Skipping" % scopus_id)
+                            return
+
+            break
+
         authors = []
         authors_id_set = set()
         for au in a_full_itm.authors:
@@ -86,17 +105,22 @@ class CitationGraph:
             authors_id_set.add(au.auid)
             authors.append("%s, %s" % (str(au.surname), str(au.given_name)))
 
+        tags = ["paper", "need_review"]
+        if isinstance(topic, str) and topic.strip():
+            tags.append(topic.strip().replace(" ", "_"))
+
         key_val = [
             "title:", "\"" + (a_full_itm.title or "Unknown" + str(time.time())[-4:]).strip() + "\"",
             "date:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "updated:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "tags:", "[paper, meta_incomplete, preprint]",
+            "tags:", str(tags),
             "aliases:", "[]",
             "", "",
             "full_title:", "\"" + a_full_itm.title + "\"" or "",
             "status:", "unread",
             "doi:", "\"" + a_full_itm.doi + "\"" or "",
-            "scopus_id:", a_full_itm.eid[7:] if a_full_itm.eid else "",
+            "link:", "",
+            "scopus_id:", scopus_id,
             "citedby:", str(a_full_itm.citedby_count),
             "authors:", str(authors),
             "venue:", "\"" + str(a_full_itm.sourcetitle_abbreviation) + "\"",
@@ -110,12 +134,72 @@ class CitationGraph:
             for line in lines:
                 f.write(line + "\n")
             f.write("---\n\n")
-            fields = ["## Overview", "## Past/Related works", "## Contribution/Problems solved", "## Main methods",
+            fields = ["followers::",
+                      "## Overview", "keynovelty::", "## Contribution/Problems solved", "## Past/Related works",
+                      "## Main methods",
                       "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2022-04-23
             for fie in fields:
                 f.write(fie + "\n\n")
 
-    def print_curr_papers(self, md_dir=""):
+    @staticmethod
+    def update_obsidian_note_meta_citedby(a_full_itm, md_dir):
+        """
+        The first file matching the scopus_id will have its citedby count updated or leaf unchanged.
+        :param a_full_itm:
+        :param md_dir:
+        :return:
+        """
+        new_cites = str(a_full_itm.citedby_count)
+        scopus_id = a_full_itm.eid[7:] if a_full_itm.eid else ""
+        num_lines_to_check = 20
+        for root, dirs, files in os.walk(md_dir):
+            for fname in files:
+                # find the file to update
+                this_file = False
+                with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
+                    heads = []
+                    try:
+                        for i in range(num_lines_to_check):
+                            heads.append(next(rec))
+                    except StopIteration:
+                        pass
+
+                    for line in heads:
+                        words = line.strip().split(":")
+                        if len(words) == 2 and words[0].strip() == "scopus_id" and words[1].strip() == scopus_id:
+                            this_file = True
+
+                if this_file:
+                    print("[+] Find the file of scopus_id:\"%s\" to update cite count." % scopus_id)
+                    with open(os.path.join(md_dir, fname), "r+", encoding="utf-8") as rec:
+                        lines = rec.readlines()
+                        for i, line in enumerate(lines):
+                            words = line.strip().split(":")
+                            if len(words) > 0 and words[0].strip() == "citedby":
+                                if len(words) > 1 and words[1].strip() == new_cites:
+                                    print("[+] cite count unchanged")
+                                else:
+                                    print("[+] %s -> %s" % (words[1].strip() if len(words) > 1 else "NA", new_cites))
+                                    lines[i] = "citedby: " + new_cites + "\n"
+                                    rec.seek(0)
+                                    rec.write("".join(lines))
+                                    rec.truncate()  # default to current pointer pos.
+                                return  # still closes the file
+                        print("[-] No \"citedby\" key found in this file.")
+
+    def update_md_citecount(self, md_dir):
+        """
+        It is a little stupid to update from the input dois instead of the whole folder. But this process pipeline is
+        more robust. Use another function to find all the dois in the files in a folder
+        :param md_dir:
+        :return:
+        """
+        os.makedirs(md_dir, exist_ok=True)
+        for i, full in enumerate(self.v_full):
+            if full:
+                CitationGraph.update_obsidian_note_meta_citedby(full, md_dir)
+
+    def print_curr_papers(self, md_dir="", topic=""):
         """
         Sort current papers by citations
         :return:
@@ -136,7 +220,7 @@ class CitationGraph:
         if md_dir:  # if create obsidian note templ at the same time.
             os.makedirs(md_dir, exist_ok=True)
             for qp in qpapers:
-                CitationGraph.create_obsidian_note_from_full(qp[1], md_dir)
+                CitationGraph.create_obsidian_note_from_full(qp[1], md_dir, topic)
 
         for case in range(2):
             if case == 0:
@@ -403,16 +487,11 @@ class CitationGraph:
         # query FULL data
         for i, doi in enumerate(self.input_doi):
             try:
-                t_ready = time.time()
-                if t_ready - self.t_last < self.q_gap:
-                    time.sleep(self.q_gap)
-
                 print("[+] Query FULL %d/%d" % (i + 1, len(self.input_doi)))
                 ab = AbstractRetrieval(doi, view='FULL', refresh=self.max_age)
                 quota_rem = ab.get_key_remaining_quota()
 
                 if quota_rem:  # really queried Scopus instead of reading cache
-                    self.t_last = time.time()
                     print("[+] Remaining quota: %s " % quota_rem)
 
                 self.v_full.append(ab)
@@ -459,17 +538,12 @@ class CitationGraph:
 
                 # if not exist in db, run the pyblio routine
                 while need_pyblio_func:
-                    t_ready = time.time()
-                    if t_ready - self.t_last < self.q_gap:
-                        time.sleep(self.q_gap)
-
                     print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
                     ab = AbstractRetrieval(doi, view='REF', refresh=True if need_refresh else self.max_age,
                                            startref=start_ref)
 
                     quota_rem = ab.get_key_remaining_quota()
                     if quota_rem:  # really queried Scopus instead of reading cache
-                        self.t_last = time.time()
                         print("[+] Remaining quota: %s " % quota_rem)
 
                     if not ab.references:
@@ -520,42 +594,111 @@ class CitationGraph:
                 print("%4d | %32s |" % (i, self.input_doi[i]))
 
 
+def find_dois_from_md(md_dir, num_lines_to_check=20):
+    dois = []
+    for root, dirs, files in os.walk(md_dir):
+        for fname in files:
+            # find the file to update
+            with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
+                heads = []
+                try:
+                    for i in range(num_lines_to_check):
+                        heads.append(next(rec))
+                except StopIteration:
+                    pass
+
+                for line in heads:
+                    words = line.strip().split(":")
+                    if len(words) == 2 and words[0].strip() == "doi":
+                        dois.append(words[1].strip().strip("\"'"))
+
+    return dois
+
+
+def update_cite_count_in_md(md_dir):
+    md_dois = find_dois_from_md(md_dir)
+    cg = CitationGraph(md_dois)
+    cg.get_bibliography_info()
+
+    cg.update_md_citecount(obsidian_tmp_dir)
+
+
 if __name__ == "__main__":
+    #  obsidian notes' temp folder. copy obsidian notes here if you want to update "citedby"
+    obsidian_tmp_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tmp")
+
     # dois = [
     #     "10.1002/rob.21762",
     #     "10.1109/TPAMI.2017.2658577",
     # ]
 
-    # 1. sparsification
-    dois = [
-        "10.1109/IROS.2016.7759502",
-        "10.1109/ICRA.2019.8793836",
-        "10.1109/LRA.2018.2798283",
-        "10.1177/0278364917691110",
-        "10.1109/LRA.2019.2961227",
-        "10.1109/TRO.2014.2347571",
-        "10.1177/0278364915581629",
-        "10.1016/j.robot.2019.06.004",
-        "10.1109/IROS.2018.8594007",
-        "10.1109/ICRA.2013.6630556",
-        "10.1109/ECMR.2013.6698835",
-        "10.1109/TRO.2016.2624754"
-    ]
     ignored = ["84871676827",
                "58249138093",
-               "84856742278",
-               "33750968800"
+               "84856742278",  # ISAM2
+               "33750968800",
+               "84866704163",  # KITTI
+               "0019574599",  # ransac
                ]
 
+    # # 1. sparsification
+    # group_topic = "sparsification"
+    # dois = [
+    #     "10.1109/IROS.2016.7759502",
+    #     "10.1109/ICRA.2019.8793836",
+    #     "10.1109/LRA.2018.2798283",
+    #     "10.1177/0278364917691110",
+    #     "10.1109/LRA.2019.2961227",
+    #     "10.1109/TRO.2014.2347571",
+    #     "10.1177/0278364915581629",
+    #     "10.1016/j.robot.2019.06.004",
+    #     "10.1109/IROS.2018.8594007",
+    #     "10.1109/ICRA.2013.6630556",
+    #     "10.1109/ECMR.2013.6698835",
+    #     "10.1109/TRO.2016.2624754"
+    # ]
+
+    # 2. loop closure
+    group_topic = "lidar_lc"
+    dois = [
+        "10.1109/ICRA.2013.6630945",
+        "10.15607/RSS.2020.XVI.009",
+        "10.1109/ICRA.2018.8460940",
+        "10.1109/LRA.2021.3091386",
+        "10.1109/ICRA48506.2021.9560740",
+        "10.1109/LRA.2021.3060741",
+        "10.1017/S0263574712000732",
+        "10.1109/ICRA48506.2021.9560915",
+        "10.1109/ROBOT.2010.5509864",
+        "10.1109/IROS.2014.6943277",
+        "10.1109/IROS.2018.8593605",
+        "10.1177/0278364908091366",
+        "10.1109/LRA.2019.2897340",
+        "10.1109/IROS.2011.6048325",
+        "10.1109/IROS.2015.7353454",
+        "10.1109/ROBOT.2009.5152712",
+        "10.1109/CVPR.2018.00470",
+        "10.1109/IROS.2016.7759060",
+        "10.1109/TRO.2021.3116424",
+        "10.1109/IROS.2018.8593953",
+        "10.1109/ICRA40945.2020.9197458",
+        "10.1109/ICRA40945.2020.9196764",
+        "10.1177/0278364919863090",
+        "10.1109/IROS40897.2019.8968094"
+    ]
+
+    ################################
+    # use case a. Normal query
     cg = CitationGraph(dois, ignored)
-
     cg.get_bibliography_info()
-    
-    obsidian_tmp_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tmp")
 
-    cg.print_curr_papers(md_dir=obsidian_tmp_dir)
+    cg.print_curr_papers(md_dir=obsidian_tmp_dir, topic=group_topic)
+    # cg.print_curr_papers(topic=group_topic)
+
     cg.print_refs(show_ref_pos=True, min_refs=1)
 
-    cg.print_paper_bibliography(11)
+    # show the bib of one paper
+    cg.print_paper_bibliography(3)
 
-    # cg.live_bib_lookup(11)
+    ################################
+    # use case b. update cite count
+    update_cite_count_in_md(obsidian_tmp_dir)
