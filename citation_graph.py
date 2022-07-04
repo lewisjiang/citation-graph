@@ -111,8 +111,8 @@ class CitationGraph:
 
         key_val = [
             "title:", "\"" + (a_full_itm.title or "Unknown" + str(time.time())[-4:]).strip() + "\"",
-            "date:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "updated:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "date:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
+            "updated:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
             "tags:", str(tags),
             "aliases:", "[]",
             "", "",
@@ -128,18 +128,19 @@ class CitationGraph:
         ]
         lines = [" ".join(key_val[2 * i: 2 * i + 2]) for i in range(len(key_val) // 2)]
 
-        md_path = os.path.join(md_dir, "".join(x for x in key_val[1] if (x.isalnum() or x in "._- ")) + ".md")
+        md_path = os.path.join(md_dir, "".join(x for x in key_val[1] if (x.isalnum() or x in "._-()+ ")) + ".md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("---\n")
             for line in lines:
                 f.write(line + "\n")
             f.write("---\n\n")
-            fields = ["followers::",
-                      "## Overview", "keynovelty::", "## Contribution/Problems solved", "## Past/Related works",
+            fields = ["followers::\nsource_code::",
+                      "## Overview\nkeynovelty::", "## Contribution/Problems solved", "## Past/Related works",
                       "## Main methods",
                       "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2022-04-23
             for fie in fields:
                 f.write(fie + "\n\n")
+            print("[+] Paper \"%s\" Obsidian record created." % scopus_id)
 
     @staticmethod
     def update_obsidian_note_meta_citedby(a_full_itm, md_dir):
@@ -310,11 +311,11 @@ class CitationGraph:
         assert min_refs > 0
         num_ignored = 0
 
-        tab_head = ["#", "local cites", "total cites", "title", "year",
+        tab_head = ["#", "ref L", "ref G", "title", "year",
                     "first author", "last author",
                     "source title", "scopus_id"]
 
-        col_widths = [6, 12, 12, 60, 4, 20, 20, 44, 12]
+        col_widths = [6, 6, 6, 60, 4, 20, 20, 44, 12]
         assert len(col_widths) == len(tab_head)
 
         fmt = "".join([" %%%d.%ds |" % (cw, cw) for cw in col_widths])
@@ -660,30 +661,45 @@ if __name__ == "__main__":
     # 2. loop closure
     group_topic = "lidar_lc"
     dois = [
-        "10.1109/ICRA.2013.6630945",
-        "10.15607/RSS.2020.XVI.009",
         "10.1109/ICRA.2018.8460940",
-        "10.1109/LRA.2021.3091386",
-        "10.1109/ICRA48506.2021.9560740",
-        "10.1109/LRA.2021.3060741",
-        "10.1017/S0263574712000732",
-        "10.1109/ICRA48506.2021.9560915",
-        "10.1109/ROBOT.2010.5509864",
-        "10.1109/IROS.2014.6943277",
-        "10.1109/IROS.2018.8593605",
-        "10.1177/0278364908091366",
-        "10.1109/LRA.2019.2897340",
-        "10.1109/IROS.2011.6048325",
-        "10.1109/IROS.2015.7353454",
-        "10.1109/ROBOT.2009.5152712",
-        "10.1109/CVPR.2018.00470",
-        "10.1109/IROS.2016.7759060",
-        "10.1109/TRO.2021.3116424",
-        "10.1109/IROS.2018.8593953",
-        "10.1109/ICRA40945.2020.9197458",
-        "10.1109/ICRA40945.2020.9196764",
+        "10.15607/RSS.2020.XVI.009",
+        "10.1109/ICRA.2013.6630945",
+        "10.1109/ICRA.2017.7989618",
+        "10.15607/RSS.2018.XIV.003",
         "10.1177/0278364919863090",
-        "10.1109/IROS40897.2019.8968094"
+        "10.1109/ICRA40945.2020.9196764",
+        "10.1109/ICRA40945.2020.9197458",
+        "10.1109/IROS45743.2020.9341341",
+        "10.1109/IROS.2018.8593953",
+        "10.1109/TRO.2021.3116424",
+        "10.1109/IROS.2016.7759060",
+        "10.1109/CVPR.2018.00470",
+        "10.1109/ROBOT.2009.5152712",
+        "10.1109/IROS.2015.7353454",
+        "10.1109/IROS.2011.6048325",
+        "10.1109/LRA.2019.2897340",
+        "10.1177/0278364908091366",
+        "10.1109/IROS.2018.8593605",
+        "10.1109/ROBOT.2010.5509864",
+        "10.1109/ICRA48506.2021.9560915",
+        "10.1017/S0263574712000732",
+        "10.1109/LRA.2021.3060741",
+        "10.1109/ICRA48506.2021.9560740",
+        "10.1109/LRA.2021.3091386",
+        "10.1109/tiv.2022.3169153",
+        "10.1109/IROS40897.2019.8968094",
+        "10.1109/IROS45743.2020.9341010",
+        "10.1109/IROS.2014.6943277",
+        "10.1109/TPAMI.2010.223",
+        "10.1109/LRA.2022.3145066",
+        "10.1109/LRA.2022.3150499",
+        "10.1109/TRO.2022.3150683",
+        "10.1016/j.isprsjprs.2022.05.005",
+        "10.1109/IROS45743.2020.9341517",
+        "10.1109/JSEN.2022.3178392",
+        "10.1109/IROS45743.2020.9341060",
+        "10.1109/IROS45743.2020.9341299"
+
     ]
 
     ################################
@@ -696,9 +712,9 @@ if __name__ == "__main__":
 
     cg.print_refs(show_ref_pos=True, min_refs=1)
 
-    # show the bib of one paper
-    cg.print_paper_bibliography(3)
+    # # show the bib of one paper
+    # cg.print_paper_bibliography(31)
 
     ################################
-    # use case b. update cite count
-    update_cite_count_in_md(obsidian_tmp_dir)
+    # # use case b. update cite count
+    # update_cite_count_in_md(obsidian_tmp_dir)
