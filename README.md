@@ -28,7 +28,7 @@ importance (citations) of a bunch of related papers.
 
 ## Sample output
 
-E.g., if I am interested in LiDAR loop closure detection and I find the DOIs of some papers, the sample output:
+E.g., if I am interested in LiDAR loop closure detection and I find the DOIs of some papers, the sample output (please use full width terminal):
 
 ```
 ################################ Query papers (Input order)
