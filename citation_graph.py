@@ -621,11 +621,11 @@ def update_cite_count_in_md(md_dir):
     cg = CitationGraph(md_dois)
     cg.get_bibliography_info()
 
-    cg.update_md_citecount(obsidian_tmp_dir)
+    cg.update_md_citecount(md_dir)
 
 
 if __name__ == "__main__":
-    #  obsidian notes' temp folder. copy obsidian notes here if you want to update "citedby"
+    #  obsidian notes' temp folder.
     obsidian_tmp_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tmp")
 
     # dois = [
@@ -659,46 +659,16 @@ if __name__ == "__main__":
     # ]
 
     # 2. loop closure
-    group_topic = "lidar_lc"
+    # group_topic = "long_term_slam"
+    group_topic = ""
     dois = [
-        "10.1109/ICRA.2018.8460940",
-        "10.15607/RSS.2020.XVI.009",
-        "10.1109/ICRA.2013.6630945",
-        "10.1109/ICRA.2017.7989618",
-        "10.15607/RSS.2018.XIV.003",
-        "10.1177/0278364919863090",
-        "10.1109/ICRA40945.2020.9196764",
-        "10.1109/ICRA40945.2020.9197458",
-        "10.1109/IROS45743.2020.9341341",
-        "10.1109/IROS.2018.8593953",
-        "10.1109/TRO.2021.3116424",
-        "10.1109/IROS.2016.7759060",
-        "10.1109/CVPR.2018.00470",
-        "10.1109/ROBOT.2009.5152712",
-        "10.1109/IROS.2015.7353454",
-        "10.1109/IROS.2011.6048325",
-        "10.1109/LRA.2019.2897340",
-        "10.1177/0278364908091366",
-        "10.1109/IROS.2018.8593605",
-        "10.1109/ROBOT.2010.5509864",
-        "10.1109/ICRA48506.2021.9560915",
-        "10.1017/S0263574712000732",
-        "10.1109/LRA.2021.3060741",
-        "10.1109/ICRA48506.2021.9560740",
-        "10.1109/LRA.2021.3091386",
-        "10.1109/tiv.2022.3169153",
-        "10.1109/IROS40897.2019.8968094",
-        "10.1109/IROS45743.2020.9341010",
-        "10.1109/IROS.2014.6943277",
-        "10.1109/TPAMI.2010.223",
-        "10.1109/LRA.2022.3145066",
-        "10.1109/LRA.2022.3150499",
-        "10.1109/TRO.2022.3150683",
-        "10.1016/j.isprsjprs.2022.05.005",
-        "10.1109/IROS45743.2020.9341517",
-        "10.1109/JSEN.2022.3178392",
-        "10.1109/IROS45743.2020.9341060",
-        "10.1109/IROS45743.2020.9341299"
+        "10.1109/CVPR52688.2022.00545",
+        "10.1109/TRO.2021.3139964",
+        "10.1109/LRA.2021.3140054",
+        "10.1109/IROS51168.2021.9636676",
+        "10.1109/TRO.2022.3174476",
+        "10.1177/0278364915581629",
+        "10.1109/LRA.2019.2961227"
 
     ]
 
@@ -716,5 +686,7 @@ if __name__ == "__main__":
     # cg.print_paper_bibliography(31)
 
     ################################
-    # # use case b. update cite count
-    # update_cite_count_in_md(obsidian_tmp_dir)
+    # use case b. update cite count
+    # copy obsidian notes to 'obs_tuc' if you want to update "citedby"
+    to_update_cite_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tuc")
+    update_cite_count_in_md(to_update_cite_dir)
