@@ -21,7 +21,7 @@ importance (citations) of a bunch of related papers.
 ## How
 
 1. Create developer account at [Scopus/Elsevier](https://www.scopus.com/).
-    2. You have 10000 requests/month as a free user.
+    2. You have 10000 requests/week as a free user.
 2. Install [pybliometrics](https://github.com/pybliometrics-dev/pybliometrics).
 3. Make sure your institution has bought the database.
 4. Edit and run the script in your institution network.

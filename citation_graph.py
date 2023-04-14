@@ -39,10 +39,10 @@ class CitationGraph:
         self.fail_set = set()  # failed doi
 
         # change accordingly when the corresponding part in pybliometrics changes
-        # as of v3.3.1-dev5
+        # as of v3.5.1
         fields = 'position id doi title authors authors_auid ' \
                  'authors_affiliationid sourcetitle publicationyear coverDate ' \
-                 'volume issue first last citedbycount type fulltext'
+                 'volume issue first last citedbycount type text fulltext'
         self.OldRefTup = namedtuple('Reference', fields)
 
         self.cache_ref_dir = os.path.join(BASE_PATH, "my_parsed_bib_cache")
