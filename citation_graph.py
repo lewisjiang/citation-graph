@@ -118,7 +118,7 @@ class CitationGraph:
             "", "",
             "full_title:", "\"" + a_full_itm.title + "\"" or "",
             "status:", "unread",
-            "doi:", "\"" + a_full_itm.doi + "\"" or "",
+            "doi:", "\"" + (a_full_itm.doi or "N/A") + "\"" or "",  # no doi on Scopus (e.g. Lazier than lazy greedy)
             "link:", "",
             "scopus_id:", scopus_id,
             "citedby:", str(a_full_itm.citedby_count),
