@@ -338,11 +338,11 @@ class CitationGraph:
         ref_cnt = min_refs
         for i, itm in enumerate(dat):
             if 0 < len(itm[1]) < ref_cnt:
-                continue
-
-            if i == len(dat) - num_ignored:
-                print("-" * 32, "Ignored references:")
-                ref_cnt = -1
+                if i == len(dat) - num_ignored:
+                    print("-" * 32, "References pinned to bottom:")
+                    ref_cnt = -1
+                else:
+                    continue
 
             local_sign = ""
             if str(itm[0].id) in self.input_scopus_id:  # if the referred paper is an input query paper
