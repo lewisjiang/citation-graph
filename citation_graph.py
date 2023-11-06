@@ -10,6 +10,7 @@ import datetime
 
 import threading
 import pyperclip
+from bs4 import BeautifulSoup
 
 
 # Abstract Retrieval, 10,000 per week, 9 per sec.
@@ -54,6 +55,7 @@ class CitationGraph:
 
         :param md_dir:
         :param a_full_itm:
+        :param topic:
         :return:
         """
         # current obsidian format: 2022-04-23
@@ -89,11 +91,22 @@ class CitationGraph:
                     except StopIteration:
                         pass
 
+                    curr_full_title = None
+                    curr_scopus_id = None
                     for line in heads:
                         words = line.strip().split(":")
-                        if len(words) > 1 and words[0].strip() == "scopus_id" and words[1].strip() == scopus_id:
-                            print("[-] Paper \"%s\" Obsidian record exists! Skipping" % scopus_id)
-                            return
+                        if len(words) > 1:
+                            if words[0].strip() == "scopus_id":
+                                curr_scopus_id = words[1].strip()
+                            elif words[0].strip() == "full_title":
+                                curr_full_title = " ".join(words[1:])
+
+                        if curr_full_title is not None and curr_scopus_id == scopus_id:
+                            break
+                    if curr_scopus_id == scopus_id:
+                        print("[-] Paper \"%s\" Obsidian record exists! Skipping: %s" % (
+                            scopus_id, curr_full_title))
+                        return
 
             break
 
@@ -109,8 +122,11 @@ class CitationGraph:
         if isinstance(topic, str) and topic.strip():
             tags.append(topic.strip().replace(" ", "_"))
 
+        title_soup = BeautifulSoup(a_full_itm.title, "html.parser")
+        title_wo_html = title_soup.get_text()
+
         key_val = [
-            "title:", "\"" + (a_full_itm.title or "Unknown" + str(time.time())[-4:]).strip() + "\"",
+            "title:", "\"" + (title_wo_html or "Unknown" + str(time.time())[-4:]).strip() + "\"",
             "date:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
             "updated:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
             "tags:", str(tags),
@@ -140,7 +156,7 @@ class CitationGraph:
                       "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2022-04-23
             for fie in fields:
                 f.write(fie + "\n\n")
-            print("[+] Paper \"%s\" Obsidian record created." % scopus_id)
+            print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (scopus_id, title_wo_html))
 
     @staticmethod
     def update_obsidian_note_meta_citedby(a_full_itm, md_dir):
@@ -174,7 +190,20 @@ class CitationGraph:
                     print("[+] Find the file of scopus_id:\"%s\" to update cite count." % scopus_id)
                     with open(os.path.join(md_dir, fname), "r+", encoding="utf-8") as rec:
                         lines = rec.readlines()
+                        is_beg = False
+                        is_fin = False
+                        pat_front_mat = re.compile("^---\s*")
                         for i, line in enumerate(lines):
+                            if is_fin:
+                                break
+                            mat_fm = pat_front_mat.match(line)
+                            if mat_fm and is_beg:
+                                is_fin = True
+                            if mat_fm and not is_beg:
+                                is_beg = True
+                            if not is_beg:
+                                continue
+
                             words = line.strip().split(":")
                             if len(words) > 0 and words[0].strip() == "citedby":
                                 if len(words) > 1 and words[1].strip() == new_cites:
@@ -186,6 +215,7 @@ class CitationGraph:
                                     rec.write("".join(lines))
                                     rec.truncate()  # default to current pointer pos.
                                 return  # still closes the file
+                            # TODO: update the "updated" field in metadata
                         print("[-] No \"citedby\" key found in this file.")
 
     def update_md_citecount(self, md_dir):
@@ -596,7 +626,9 @@ class CitationGraph:
 
 
 def find_dois_from_md(md_dir, num_lines_to_check=20):
-    dois = []
+    # Do the scopus ids of papers change? Because they should cover a wider range of papers therefore more suitable as
+    # query id
+    file_dois = []
     for root, dirs, files in os.walk(md_dir):
         for fname in files:
             # find the file to update
@@ -611,17 +643,17 @@ def find_dois_from_md(md_dir, num_lines_to_check=20):
                 for line in heads:
                     words = line.strip().split(":")
                     if len(words) == 2 and words[0].strip() == "doi":
-                        dois.append(words[1].strip().strip("\"'"))
+                        file_dois.append(words[1].strip().strip("\"'"))
 
-    return dois
+    return file_dois
 
 
 def update_cite_count_in_md(md_dir):
     md_dois = find_dois_from_md(md_dir)
-    cg = CitationGraph(md_dois)
-    cg.get_bibliography_info()
+    cg1 = CitationGraph(md_dois)
+    cg1.get_bibliography_info()
 
-    cg.update_md_citecount(md_dir)
+    cg1.update_md_citecount(md_dir)
 
 
 if __name__ == "__main__":
