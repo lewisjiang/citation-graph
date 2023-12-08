@@ -58,7 +58,7 @@ class CitationGraph:
         :param topic:
         :return:
         """
-        # current obsidian format: 2022-04-23
+        # current obsidian format: 2023-12-08
         """
         ---
         title: <% tp.file.title %>
@@ -151,9 +151,10 @@ class CitationGraph:
                 f.write(line + "\n")
             f.write("---\n\n")
             fields = ["followers::\nsource_code::",
-                      "## Overview\nkeynovelty::", "## Contribution/Problems solved", "## Past/Related works",
+                      "## Overview\nkeynovelty::\n### Concise remarks",
+                      "## Contribution/Problems solved", "## Past/Related works",
                       "## Main methods",
-                      "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2022-04-23
+                      "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2023-12-08
             for fie in fields:
                 f.write(fie + "\n\n")
             print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (scopus_id, title_wo_html))
