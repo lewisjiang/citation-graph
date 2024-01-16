@@ -9,6 +9,7 @@ import csv
 import datetime
 
 import threading
+import requests
 import pyperclip
 from bs4 import BeautifulSoup
 
@@ -16,7 +17,21 @@ from bs4 import BeautifulSoup
 # Abstract Retrieval, 10,000 per week, 9 per sec.
 
 class CitationGraph:
-    def __init__(self, doi_lst, ignore_lst=None, max_age=30):
+    class UnifiedObsMetadata:
+        """
+        To accommodate both scopus and doi response in paper note generation pipeline.
+        """
+
+        def __init__(self):
+            self.title = None
+            self.doi = ""
+            self.citedby_count = ""
+            self.sourcetitle_abbr = ""
+            self.year = ""
+            self.authors = []
+            self.scopus_id = ""
+
+    def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_refresh=7):
         if ignore_lst is None:
             ignore_lst = []
         assert max_age > 7
@@ -50,11 +65,11 @@ class CitationGraph:
         os.makedirs(self.cache_ref_dir, exist_ok=True)
 
     @staticmethod
-    def create_obsidian_note_from_full(a_full_itm, md_dir, topic):
+    def create_obsidian_note_from_full(uom, md_dir, topic):
         """
 
         :param md_dir:
-        :param a_full_itm:
+        :param uom:
         :param topic:
         :return:
         """
@@ -79,50 +94,57 @@ class CitationGraph:
         """
 
         # TODO: check existence by scopus id
-        scopus_id = a_full_itm.eid[7:] if a_full_itm.eid else ""
-        num_lines_to_check = 20
         for root, dirs, files in os.walk(md_dir):
             for fname in files:
                 with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
                     heads = []
+                    in_frontmatter = False
                     try:
-                        for i in range(num_lines_to_check):
-                            heads.append(next(rec))
+                        while True:
+                            line = next(rec)
+                            if line.rstrip() == "---":
+                                if not in_frontmatter:
+                                    in_frontmatter = True
+                                else:
+                                    raise StopIteration
+                            if in_frontmatter:
+                                heads.append(line)
+
                     except StopIteration:
                         pass
 
                     curr_full_title = None
                     curr_scopus_id = None
+                    curr_doi = None
+
+                    same_id = False
                     for line in heads:
                         words = line.strip().split(":")
                         if len(words) > 1:
                             if words[0].strip() == "scopus_id":
-                                curr_scopus_id = words[1].strip()
+                                curr_scopus_id = words[1].strip().strip("\"").strip("\'")
+                            elif words[0].strip() == "doi":
+                                curr_doi = words[1].strip().strip("\"").strip("\'")
                             elif words[0].strip() == "full_title":
-                                curr_full_title = " ".join(words[1:])
+                                curr_full_title = " ".join(words[1:]).strip("\"").strip("\'")
 
-                        if curr_full_title is not None and curr_scopus_id == scopus_id:
+                        same_id = curr_scopus_id and uom.scopus_id.lower() == curr_scopus_id.lower() \
+                                  or curr_doi \
+                                  and uom.doi.lower() == curr_doi.lower()
+                        if curr_full_title is not None and same_id:
                             break
-                    if curr_scopus_id == scopus_id:
+                    if same_id:
                         print("[-] Paper \"%s\" Obsidian record exists! Skipping: %s" % (
-                            scopus_id, curr_full_title))
+                            uom.scopus_id, curr_full_title))
                         return
 
             break
-
-        authors = []
-        authors_id_set = set()
-        for au in a_full_itm.authors:
-            if au.auid in authors_id_set:
-                continue
-            authors_id_set.add(au.auid)
-            authors.append("%s, %s" % (str(au.surname), str(au.given_name)))
 
         tags = ["paper", "need_review"]
         if isinstance(topic, str) and topic.strip():
             tags.append(topic.strip().replace(" ", "_"))
 
-        title_soup = BeautifulSoup(a_full_itm.title, "html.parser")
+        title_soup = BeautifulSoup(uom.title, "html.parser")
         title_wo_html = title_soup.get_text()
 
         key_val = [
@@ -132,19 +154,22 @@ class CitationGraph:
             "tags:", str(tags),
             "aliases:", "[]",
             "", "",
-            "full_title:", "\"" + a_full_itm.title + "\"" or "",
+            "full_title:", "\"" + uom.title + "\"" or "",
             "status:", "unread",
-            "doi:", "\"" + (a_full_itm.doi or "N/A") + "\"" or "",  # no doi on Scopus (e.g. Lazier than lazy greedy)
+            "doi:", "\"" + (uom.doi or "N/A") + "\"" or "",  # no doi on Scopus (e.g. Lazier than lazy greedy)
             "link:", "",
-            "scopus_id:", scopus_id,
-            "citedby:", str(a_full_itm.citedby_count),
-            "authors:", str(authors),
-            "venue:", "\"" + str(a_full_itm.sourcetitle_abbreviation) + "\"",
-            "year:", str(a_full_itm.coverDate[:4] if a_full_itm.coverDate else ""),
+            "scopus_id:", uom.scopus_id,
+            "citedby:", str(uom.citedby_count),
+            "authors:", str(uom.authors),
+            "venue:", "\"" + str(uom.sourcetitle_abbr) + "\"",
+            "year:", str(uom.year),
         ]
         lines = [" ".join(key_val[2 * i: 2 * i + 2]) for i in range(len(key_val) // 2)]
 
         md_path = os.path.join(md_dir, "".join(x for x in key_val[1] if (x.isalnum() or x in "._-()+ ")) + ".md")
+        if os.path.isfile(md_path):
+            print("[!] Overwriting markdown file of different ID and same file name! title: %s" % title_wo_html)
+            assert False
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("---\n")
             for line in lines:
@@ -157,38 +182,114 @@ class CitationGraph:
                       "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2023-12-08
             for fie in fields:
                 f.write(fie + "\n\n")
-            print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (scopus_id, title_wo_html))
+            print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (uom.scopus_id, title_wo_html))
 
     @staticmethod
-    def update_obsidian_note_meta_citedby(a_full_itm, md_dir):
+    def create_obsidian_notes_from_dois(all_dois, md_dir, topic, skip_by_doi=True):
+        """
+
+        :param all_dois:
+        :param md_dir:
+        :param topic:
+        :param skip_by_doi: whether to skip requesting by looking up doi in files
+        :return:
+        """
+
+        def separate_authors(authors_str):
+            """
+            This is used to separate author entry into individual authors surrounded with ""
+            """
+            cleaned = authors_str.strip().split("\n")[0]
+            au_list = cleaned.split(" and ")
+            res = "\', \'".join([i.strip() for i in au_list])
+            res = "\'" + res + "\'"
+            # print(res)
+            return res
+
+        doi_site = "http://dx.doi.org/"
+        headers = {
+            "Accept": "application/x-bibtex"
+        }
+
+        assert md_dir
+
+        for doi in all_dois:
+            url = doi_site + doi
+
+            req = requests.get(url=url, headers=headers)
+            if req.status_code != 200:
+                print("Error query doi.org: %d" % req.status_code, url)
+                continue
+            resp_txt = req.text.strip()
+
+            uom = CitationGraph.UnifiedObsMetadata()
+
+            p1 = re.search("title={(.+?)}", resp_txt)
+            if p1:
+                uom.title = p1.groups()[0]
+
+            p1 = re.search("DOI={(.+?)}", resp_txt)
+            if p1:
+                uom.doi = p1.groups()[0]
+
+            p1 = re.search("booktitle={(.+?)}", resp_txt)
+            if p1:
+                uom.sourcetitle_abbr = CitationGraph.simplify_source_title(p1.groups()[0])
+
+            p1 = re.search("journal={(.+?)}", resp_txt)
+            if p1:
+                uom.sourcetitle_abbr = CitationGraph.simplify_source_title(p1.groups()[0])
+
+            p1 = re.search("author={(.+?)}", resp_txt)
+            if p1:
+                uom.authors = "[%s]" % separate_authors(p1.groups()[0])
+
+            p1 = re.search("year={(.+?)}", resp_txt)
+            if p1:
+                uom.year = p1.groups()[0]
+
+            CitationGraph.create_obsidian_note_from_full(uom, md_dir, topic)
+
+    @staticmethod
+    def update_obsidian_note_meta_citedby(uom, md_dir):
         """
         The first file matching the scopus_id will have its citedby count updated or leaf unchanged.
-        :param a_full_itm:
+        :param uom:
         :param md_dir:
         :return:
         """
-        new_cites = str(a_full_itm.citedby_count)
-        scopus_id = a_full_itm.eid[7:] if a_full_itm.eid else ""
-        num_lines_to_check = 20
+        new_cites = str(uom.citedby_count)
         for root, dirs, files in os.walk(md_dir):
             for fname in files:
                 # find the file to update
                 this_file = False
                 with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
-                    heads = []
+                    in_frontmatter = False
                     try:
-                        for i in range(num_lines_to_check):
-                            heads.append(next(rec))
+                        while True:
+                            line = next(rec)
+                            if line.rstrip() == "---":
+                                if not in_frontmatter:
+                                    in_frontmatter = True
+                                else:
+                                    raise StopIteration
+                            if in_frontmatter:
+                                words = line.strip().split(":")
+                                if len(words) == 2 and \
+                                        (words[0].strip() == "scopus_id" and words[1].strip() == uom.scopus_id or
+                                         words[0].strip() == "doi" and
+                                         words[1].strip().lower().strip("\"").strip("\'") == uom.doi.lower()):
+                                    this_file = True
+                                    break
+
                     except StopIteration:
                         pass
 
-                    for line in heads:
-                        words = line.strip().split(":")
-                        if len(words) == 2 and words[0].strip() == "scopus_id" and words[1].strip() == scopus_id:
-                            this_file = True
-
                 if this_file:
-                    print("[+] Find the file of scopus_id:\"%s\" to update cite count." % scopus_id)
+                    if uom.scopus_id:
+                        print("[+] Find the file of scopus_id:\"%s\" to update cite count." % uom.scopus_id)
+                    elif uom.doi:
+                        print("[+] Find the file of doi:\"%s\" to update cite count." % uom.doi)
                     with open(os.path.join(md_dir, fname), "r+", encoding="utf-8") as rec:
                         lines = rec.readlines()
                         is_beg = False
@@ -229,7 +330,11 @@ class CitationGraph:
         os.makedirs(md_dir, exist_ok=True)
         for i, full in enumerate(self.v_full):
             if full:
-                CitationGraph.update_obsidian_note_meta_citedby(full, md_dir)
+                uom = CitationGraph.UnifiedObsMetadata()
+                uom.scopus_id = full.eid[7:] if full.eid else ""
+                uom.citedby_count = full.citedby_count
+                uom.doi = full.doi or ""
+                CitationGraph.update_obsidian_note_meta_citedby(uom, md_dir)
 
     def print_curr_papers(self, md_dir="", topic=""):
         """
@@ -252,7 +357,25 @@ class CitationGraph:
         if md_dir:  # if create obsidian note templ at the same time.
             os.makedirs(md_dir, exist_ok=True)
             for qp in qpapers:
-                CitationGraph.create_obsidian_note_from_full(qp[1], md_dir, topic)
+                uom = CitationGraph.UnifiedObsMetadata()
+                uom.title = qp[1].title
+                uom.doi = qp[1].doi or ""  # if null, keep as default
+                uom.citedby_count = qp[1].citedby_count
+                uom.sourcetitle_abbr = qp[1].sourcetitle_abbreviation
+                uom.year = qp[1].coverDate[:4] if qp[1].coverDate else ""
+
+                authors = []
+                authors_id_set = set()
+                for au in qp[1].authors:
+                    if au.auid in authors_id_set:
+                        continue
+                    authors_id_set.add(au.auid)
+                    authors.append("%s, %s" % (str(au.surname), str(au.given_name)))
+                uom.authors = authors
+
+                uom.scopus_id = qp[1].eid[7:] if qp[1].eid else ""
+
+                CitationGraph.create_obsidian_note_from_full(uom, md_dir, topic)
 
         for case in range(2):
             if case == 0:
@@ -299,7 +422,7 @@ class CitationGraph:
             ("Research", "Res."),
             ("Proceedings?", "Proc."),
             ("Conferences?", "Conf."),
-            ("Intelligent", "Intell."),
+            ("Intelligen(t|ce)", "Intell."),
             (r"Systems?", "Syst."),
             ("Science", "Sci."),
             ("Automation", "Autom."),
@@ -723,3 +846,12 @@ if __name__ == "__main__":
     # copy obsidian notes to 'obs_tuc' if you want to update "citedby"
     to_update_cite_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tuc")
     update_cite_count_in_md(to_update_cite_dir)
+
+    # ################################
+    # use case c. Generate paper note template from DOI (no cross referencing)
+    dois = [
+        "10.1609/aaai.v29i1.9486",
+        "10.1109/TRO.2016.2624754",  # tro16 slam
+    ]
+
+    CitationGraph.create_obsidian_notes_from_dois(dois, md_dir=obsidian_tmp_dir, topic="")
