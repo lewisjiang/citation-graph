@@ -22,6 +22,9 @@ class CitationGraph:
         To accommodate both scopus and doi response in paper note generation pipeline.
         """
 
+        # TODO: accommodate with arxiv: url = "https://arxiv.org/bibtex/1234.5678"
+        #  Note the author names have given name in the front.
+
         def __init__(self):
             self.title = None
             self.doi = ""
@@ -36,6 +39,8 @@ class CitationGraph:
             ignore_lst = []
         assert max_age > 7
         self.max_age = max_age  # manually increase age when the internet is not available and you want to read old data
+        # TODO
+        self.min_refresh = min_refresh  # if a record \in [min_ref, max_age], it has a chance to be updated in a query
         self.curr_refs = dict()  # entry: ref.id: [Reference, (local_id_ref_pos)_set]
 
         self.input_doi = []
@@ -94,10 +99,13 @@ class CitationGraph:
         """
 
         # TODO: check existence by scopus id
+        # FIXME: it is still possible to generate duplicate files for the same paper, since doi lookup and scopus lookup
+        #  are not synchronized. More dangerously, they will generate 2 files that only differ in capitalization.
+        #  e.g. (Lazier than lazy greedy)
         for root, dirs, files in os.walk(md_dir):
             for fname in files:
+                heads = []
                 with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
-                    heads = []
                     in_frontmatter = False
                     try:
                         while True:
@@ -113,30 +121,30 @@ class CitationGraph:
                     except StopIteration:
                         pass
 
-                    curr_full_title = None
-                    curr_scopus_id = None
-                    curr_doi = None
+                curr_full_title = None
+                curr_scopus_id = None
+                curr_doi = None
 
-                    same_id = False
-                    for line in heads:
-                        words = line.strip().split(":")
-                        if len(words) > 1:
-                            if words[0].strip() == "scopus_id":
-                                curr_scopus_id = words[1].strip().strip("\"").strip("\'")
-                            elif words[0].strip() == "doi":
-                                curr_doi = words[1].strip().strip("\"").strip("\'")
-                            elif words[0].strip() == "full_title":
-                                curr_full_title = " ".join(words[1:]).strip("\"").strip("\'")
+                same_id = False
+                for line in heads:
+                    words = line.strip().split(":")
+                    if len(words) > 1:
+                        if words[0].strip() == "scopus_id":
+                            curr_scopus_id = words[1].strip().strip("\"'")
+                        elif words[0].strip() == "doi":
+                            curr_doi = words[1].strip().strip("\"'")
+                        elif words[0].strip() == "full_title":
+                            curr_full_title = " ".join(words[1:]).strip("\"'")
 
-                        same_id = curr_scopus_id and uom.scopus_id.lower() == curr_scopus_id.lower() \
-                                  or curr_doi \
-                                  and uom.doi.lower() == curr_doi.lower()
-                        if curr_full_title is not None and same_id:
-                            break
-                    if same_id:
-                        print("[-] Paper \"%s\" Obsidian record exists! Skipping: %s" % (
-                            uom.scopus_id, curr_full_title))
-                        return
+                    same_id = curr_scopus_id and uom.scopus_id.lower() == curr_scopus_id.lower() \
+                              or curr_doi \
+                              and uom.doi.lower() == curr_doi.lower()
+                    if curr_full_title is not None and same_id:
+                        break
+                if same_id:
+                    print("[-] Paper \"%s\" Obsidian record exists! Skipping: %s\"" % (
+                        uom.scopus_id, curr_full_title))
+                    return
 
             break
 
@@ -182,7 +190,37 @@ class CitationGraph:
                       "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2023-12-08
             for fie in fields:
                 f.write(fie + "\n\n")
-            print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (uom.scopus_id, title_wo_html))
+            print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (uom.scopus_id if uom.scopus_id else uom.doi,
+                                                                        title_wo_html))
+
+    @staticmethod
+    def read_val_by_key_from_frontmatter(fpath, key_name):
+        """
+        Explicitly parses the frontmatter surrounded by "---" in the beginning of a file
+        TODO: parse multiline entries, add early termination by line number
+        :param fpath:
+        :param key_name:
+        :return:
+        """
+        with open(fpath, "r", encoding="utf-8") as rec:
+            in_frontmatter = False
+            try:
+                while True:
+                    line = next(rec)
+                    if line.rstrip() == "---":
+                        if not in_frontmatter:
+                            in_frontmatter = True
+                        else:
+                            raise StopIteration
+                    if in_frontmatter:
+                        line_seg = line.split(":")
+                        if len(line_seg) > 1 and line_seg[0].strip() == key_name.strip():
+                            val = "".join(line_seg[1:]).strip()
+                            return val
+
+            except StopIteration:
+                pass
+        return ""
 
     @staticmethod
     def create_obsidian_notes_from_dois(all_dois, md_dir, topic, skip_by_doi=True):
@@ -213,7 +251,21 @@ class CitationGraph:
 
         assert md_dir
 
+        existing_dois = dict()
+        if skip_by_doi:
+            for root, dirs, files in os.walk(md_dir):
+                for fname in files:
+                    curr_doi = CitationGraph.read_val_by_key_from_frontmatter(os.path.join(root, fname), "doi")
+                    if curr_doi:
+                        existing_dois[curr_doi.lower().strip().strip("\"'")] = fname
+
         for doi in all_dois:
+            if skip_by_doi:
+                q_res = existing_dois.get(doi.strip().lower())
+                if q_res:
+                    print("[-] record of doi %s exists! Skipping: %s" % (doi, str(q_res)))
+                    continue
+
             url = doi_site + doi
 
             req = requests.get(url=url, headers=headers)
@@ -278,7 +330,7 @@ class CitationGraph:
                                 if len(words) == 2 and \
                                         (words[0].strip() == "scopus_id" and words[1].strip() == uom.scopus_id or
                                          words[0].strip() == "doi" and
-                                         words[1].strip().lower().strip("\"").strip("\'") == uom.doi.lower()):
+                                         words[1].strip().lower().strip("\"'") == uom.doi.lower()):
                                     this_file = True
                                     break
 
@@ -743,37 +795,27 @@ class CitationGraph:
                 self.v_ref.append(None)
                 raise e
 
-        print("#" * 32 + " Failed:")
+        print("#" * 32 + " Failed: " + str(len(self.v_ref)))
         for i, ref in enumerate(self.v_ref):
             if not ref:
                 print("%4d | %32s |" % (i, self.input_doi[i]))
-
-
-def find_dois_from_md(md_dir, num_lines_to_check=20):
-    # Do the scopus ids of papers change? Because they should cover a wider range of papers therefore more suitable as
-    # query id
-    file_dois = []
-    for root, dirs, files in os.walk(md_dir):
-        for fname in files:
-            # find the file to update
-            with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
-                heads = []
-                try:
-                    for i in range(num_lines_to_check):
-                        heads.append(next(rec))
-                except StopIteration:
-                    pass
-
-                for line in heads:
-                    words = line.strip().split(":")
-                    if len(words) == 2 and words[0].strip() == "doi":
-                        file_dois.append(words[1].strip().strip("\"'"))
-
-    return file_dois
+        print()
 
 
 def update_cite_count_in_md(md_dir):
-    md_dois = find_dois_from_md(md_dir)
+    """
+    TODO: construct queries from either doi or scopus id
+    :param md_dir:
+    :return:
+    """
+
+    md_dois = []
+    for root, dirs, files in os.walk(md_dir):
+        for fname in files:
+            fdoi = CitationGraph.read_val_by_key_from_frontmatter(os.path.join(root, fname), "doi")
+            if fdoi.strip().strip("\"'"):
+                md_dois.append(fdoi.strip().strip("\"'"))
+
     cg1 = CitationGraph(md_dois)
     cg1.get_bibliography_info()
 
