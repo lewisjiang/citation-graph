@@ -155,12 +155,16 @@ class CitationGraph:
         title_soup = BeautifulSoup(uom.title, "html.parser")
         title_wo_html = title_soup.get_text()
 
+        title_short = "\"" + title_wo_html.split(":")[0] + "\""
+        if len(title_short) - 2 > len(title_wo_html) // 4:
+            title_short = ""
+
         key_val = [
             "title:", "\"" + (title_wo_html or "Unknown" + str(time.time())[-4:]).strip() + "\"",
             "date:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
             "updated:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
             "tags:", str(tags),
-            "aliases:", "[]",
+            "aliases:", "[%s]" % title_short,
             "", "",
             "full_title:", "\"" + uom.title + "\"" or "",
             "status:", "unread",
@@ -184,7 +188,8 @@ class CitationGraph:
                 f.write(line + "\n")
             f.write("---\n\n")
             fields = ["followers::\nsource_code::",
-                      "## Overview\nkeynovelty::\n### Concise remarks",
+                      "## Overview\nkeynovelty::\n\n",
+                      "### Concise remarks",
                       "## Contribution/Problems solved", "## Past/Related works",
                       "## Main methods",
                       "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2023-12-08
