@@ -1,5 +1,6 @@
 from pybliometrics.scopus.exception import Scopus404Error
 from pybliometrics.scopus import AbstractRetrieval
+from pybliometrics.scopus import init as scopus_init
 from pybliometrics.scopus.utils.constants import BASE_PATH
 from collections import namedtuple
 import time
@@ -705,6 +706,8 @@ class CitationGraph:
 
                 if quota_rem:  # really queried Scopus instead of reading cache
                     print("[+] Remaining quota: %s " % quota_rem)
+                else:  # reading the cache, then we need to force query if its life is longer than xxx
+                    pass
 
                 self.v_full.append(ab)
                 self.input_scopus_id.add(ab.eid[7:])
@@ -729,7 +732,8 @@ class CitationGraph:
         for i, doi in enumerate(self.input_doi):
             try:
                 all_curr_refs = []
-                start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
+                # Outdated as of pybliometrics v4.1
+                # start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
                 need_refresh = False
                 need_pyblio_func = True
 
@@ -749,10 +753,9 @@ class CitationGraph:
                             print("[+] Load REF %d/%d" % (i + 1, len(self.input_doi)))
 
                 # if not exist in db, run the pyblio routine
-                while need_pyblio_func:
+                if need_pyblio_func:
                     print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
-                    ab = AbstractRetrieval(doi, view='REF', refresh=True if need_refresh else self.max_age,
-                                           startref=start_ref)
+                    ab = AbstractRetrieval(doi, view='REF', refresh=True if need_refresh else self.max_age)
 
                     quota_rem = ab.get_key_remaining_quota()
                     if quota_rem:  # really queried Scopus instead of reading cache
@@ -761,17 +764,9 @@ class CitationGraph:
                     if not ab.references:
                         raise ValueError(" !  Empty references!")
 
-                    if len(ab.references) == ab.refcount:
-                        all_curr_refs += ab.references
-                        break
+                    all_curr_refs += ab.references
+                    assert len(ab.references) == ab.refcount
 
-                    if need_refresh:
-                        all_curr_refs += ab.references
-                        start_ref += 40
-                        if len(all_curr_refs) == ab.refcount:
-                            break
-                    else:
-                        need_refresh = True
 
                 if need_pyblio_func:
                     self.save_bibliography_to_file(all_curr_refs, doi)
@@ -787,7 +782,7 @@ class CitationGraph:
                 self.v_ref.append(all_curr_refs)
 
             except Scopus404Error as e1:
-                print(" !  REF view of DOI: ", doi, "cannot be found!")
+                print(" !  REF view of DOI: ", doi, "cannot be found!", e1)
                 self.fail_set.add(doi)
                 self.v_ref.append(None)
             except ValueError as e2:
@@ -800,7 +795,7 @@ class CitationGraph:
                 self.v_ref.append(None)
                 raise e
 
-        print("#" * 32 + " Failed: " + str(len(self.v_ref)))
+        print("#" * 32 + " Failed: %d out of %d" % (self.v_ref.count(None), len(self.v_ref)))
         for i, ref in enumerate(self.v_ref):
             if not ref:
                 print("%4d | %32s |" % (i, self.input_doi[i]))
@@ -828,6 +823,8 @@ def update_cite_count_in_md(md_dir):
 
 
 if __name__ == "__main__":
+    scopus_init()
+
     #  obsidian notes' temp folder.
     obsidian_tmp_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tmp")
 
