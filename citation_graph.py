@@ -34,6 +34,8 @@ class CitationGraph:
             self.year = ""
             self.authors = []
             self.scopus_id = ""
+            self.link = ""
+            self.updated = ""
 
     def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_refresh=7):
         if ignore_lst is None:
@@ -163,14 +165,14 @@ class CitationGraph:
         key_val = [
             "title:", "\"" + (title_wo_html or "Unknown" + str(time.time())[-4:]).strip() + "\"",
             "date:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
-            "updated:", "\"" + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\"",
+            "updated:", "\"" + (uom.updated or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')) + "\"",
             "tags:", str(tags),
             "aliases:", "[%s]" % title_short,
             "", "",
             "full_title:", "\"" + uom.title + "\"" or "",
             "status:", "unread",
             "doi:", "\"" + (uom.doi or "N/A") + "\"" or "",  # no doi on Scopus (e.g. Lazier than lazy greedy)
-            "link:", "",
+            "link:", uom.link or "",
             "scopus_id:", uom.scopus_id,
             "citedby:", str(uom.citedby_count),
             "authors:", str(uom.authors),
@@ -274,13 +276,15 @@ class CitationGraph:
 
             url = doi_site + doi
 
-            req = requests.get(url=url, headers=headers)
+            req = requests.get(url=url, headers=headers)  # essentially a bibtex string
             if req.status_code != 200:
                 print("Error query doi.org: %d" % req.status_code, url)
                 continue
             resp_txt = req.text.strip()
 
             uom = CitationGraph.UnifiedObsMetadata()
+
+            # TODO: use more robust bibtex parser
 
             p1 = re.search("title={(.+?)}", resp_txt)
             if p1:
@@ -307,6 +311,71 @@ class CitationGraph:
                 uom.year = p1.groups()[0]
 
             CitationGraph.create_obsidian_note_from_full(uom, md_dir, topic)
+
+    @staticmethod
+    def create_obsidian_notes_from_arxiv(all_aids, md_dir, topic, skip_by_aid=True):
+        """
+        http://export.arxiv.org/oai2?verb=GetRecord&identifier=oai:arXiv.org:2405.03413&metadataPrefix=arXiv
+        """
+        pat1 = re.compile("ar[Xx]iv:(\d{4}\.\d{4,5})")
+        pat2 = re.compile("arxiv.org/abs/(\d{4}\.\d{4,5})")
+
+        existing_aids = dict()
+        if skip_by_aid:
+            for root, dirs, files in os.walk(md_dir):
+                for fname in files:
+                    curr_arxiv_link = CitationGraph.read_val_by_key_from_frontmatter(os.path.join(root, fname), "link")
+                    match_aid = pat2.search(curr_arxiv_link)
+                    if match_aid:
+                        existing_aids[match_aid.groups()[0]] = fname
+
+        for aid in all_aids:
+            match_aid1 = pat1.search(aid)
+            match_aid2 = pat2.search(aid)
+            if not match_aid1 and not match_aid2:
+                print("[-] Invalid arxiv id: %s" % aid)
+                continue
+            aid = match_aid1.groups()[0] if match_aid1 else match_aid2.groups()[0]
+            print("[+] Processing arxiv %s" % aid)
+
+            if skip_by_aid:
+                q_res = existing_aids.get(aid.strip())
+                if q_res:
+                    print("[-] record of arxiv %s exists! Skipping: %s" % (aid, str(q_res)))
+                    continue
+
+            url = "http://export.arxiv.org/oai2?verb=GetRecord&identifier=oai:arXiv.org:%s&metadataPrefix=arXiv" % aid
+            # usage guideline: https://info.arxiv.org/help/bulk_data.html#harvest
+            req = requests.get(url)
+            time.sleep(1)
+            if req.status_code != 200:
+                print("Error query arxiv: %d" % req.status_code, url)
+                continue
+            resp_txt = req.text.strip()
+            soup = BeautifulSoup(resp_txt, "lxml-xml")
+
+            uom = CitationGraph.UnifiedObsMetadata()
+
+            arx_tag = soup.find("arXiv")
+            if arx_tag:
+                uom.title = re.sub("\s+", " ", arx_tag.find("title").text).strip()
+                id_ret = arx_tag.find("id").text
+                assert id_ret == aid
+                uom.link = "http://arxiv.org/abs/" + aid  # keep arxiv id in link
+                time_tag = arx_tag.find("updated")
+                if not time_tag:
+                    time_tag = arx_tag.find("created")
+                uom.updated = time_tag.text[:10]
+                uom.year = arx_tag.find("created").text[:4]
+
+                uom.authors = []
+                authors = arx_tag.find_all("author")
+                for au in authors:
+                    name1 = au.find("forenames").text.strip()
+                    name2 = au.find("keyname").text.strip()
+                    uom.authors.append("%s, %s" % (name2, name1))
+
+                CitationGraph.create_obsidian_note_from_full(uom, md_dir, topic)
 
     @staticmethod
     def update_obsidian_note_meta_citedby(uom, md_dir):
@@ -767,7 +836,6 @@ class CitationGraph:
                     all_curr_refs += ab.references
                     assert len(ab.references) == ab.refcount
 
-
                 if need_pyblio_func:
                     self.save_bibliography_to_file(all_curr_refs, doi)
 
@@ -899,3 +967,11 @@ if __name__ == "__main__":
     ]
 
     CitationGraph.create_obsidian_notes_from_dois(dois, md_dir=obsidian_tmp_dir, topic="")
+
+    ################################
+    # use case d. Generate paper note template from arXiv (no cross referencing)
+    arxiv_ids = [
+        "arXiv:2312.01616"
+    ]
+
+    CitationGraph.create_obsidian_notes_from_arxiv(arxiv_ids, obsidian_tmp_dir, topic="")
