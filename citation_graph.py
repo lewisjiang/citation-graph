@@ -8,6 +8,7 @@ import re
 import os
 import csv
 import datetime
+import random
 
 import threading
 import requests
@@ -40,9 +41,8 @@ class CitationGraph:
     def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_refresh=7):
         if ignore_lst is None:
             ignore_lst = []
-        assert max_age > 7
+        assert max_age >= 7 and max_age >= min_refresh
         self.max_age = max_age  # manually increase age when the internet is not available and you want to read old data
-        # TODO
         self.min_refresh = min_refresh  # if a record \in [min_ref, max_age], it has a chance to be updated in a query
         self.curr_refs = dict()  # entry: ref.id: [Reference, (local_id_ref_pos)_set]
 
@@ -58,7 +58,7 @@ class CitationGraph:
         print("A total %d input dois." % len(doi_lst))
 
         self.v_full = []
-        self.v_ref = []  # list of list of references
+        self.v_ref = []  # list of lists of references
 
         self.fail_set = set()  # failed doi
 
@@ -276,7 +276,7 @@ class CitationGraph:
 
             url = doi_site + doi
 
-            req = requests.get(url=url, headers=headers)  # essentially a bibtex string
+            req = requests.get(url=url, headers=headers)  # essentially a bibtex file
             if req.status_code != 200:
                 print("Error query doi.org: %d" % req.status_code, url)
                 continue
@@ -361,7 +361,7 @@ class CitationGraph:
                 uom.title = re.sub("\s+", " ", arx_tag.find("title").text).strip()
                 id_ret = arx_tag.find("id").text
                 assert id_ret == aid
-                uom.link = "http://arxiv.org/abs/" + aid  # keep arxiv id in link
+                uom.link = "http://arxiv.org/abs/" + aid  # keep arxiv id in links
                 time_tag = arx_tag.find("updated")
                 if not time_tag:
                     time_tag = arx_tag.find("created")
@@ -770,7 +770,8 @@ class CitationGraph:
         for i, doi in enumerate(self.input_doi):
             try:
                 print("[+] Query FULL %d/%d" % (i + 1, len(self.input_doi)))
-                ab = AbstractRetrieval(doi, view='FULL', refresh=self.max_age)
+                rolled_refresh_days = self.min_refresh + random.randint(0, self.max_age - self.min_refresh)
+                ab = AbstractRetrieval(doi, view='FULL', refresh=rolled_refresh_days)
                 quota_rem = ab.get_key_remaining_quota()
 
                 if quota_rem:  # really queried Scopus instead of reading cache
@@ -803,28 +804,29 @@ class CitationGraph:
                 all_curr_refs = []
                 # Outdated as of pybliometrics v4.1
                 # start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
-                need_refresh = False
                 need_pyblio_func = True
 
                 # test if corresponding FULL is successful
                 if doi in self.fail_set:
                     raise ValueError("FULL view already failed.")
 
-                # try to read from db
-                f_name = doi.replace('/', '_') + ".csv"
-                if f_name in cached_ref_names:
-                    t_cache = os.path.getmtime(os.path.join(self.cache_ref_dir, f_name))
-                    # The official "REF" file may have expired. But the issue should be minor:
-                    if (time.time() - t_cache) / 86400 < self.max_age:
-                        all_curr_refs = self.load_bibliography_from_file(doi)
-                        if all_curr_refs:  # if load query successful
-                            need_pyblio_func = False
-                            print("[+] Load REF %d/%d" % (i + 1, len(self.input_doi)))
+                # # try to read from db # keep a record of the ref parsed in my way manually. (not necessary) 1/2
+                # need_refresh = False
+                # f_name = doi.replace('/', '_') + ".csv"
+                # if f_name in cached_ref_names:
+                #     t_cache = os.path.getmtime(os.path.join(self.cache_ref_dir, f_name))
+                #     # The official "REF" file may have expired. But the issue should be minor:
+                #     if (time.time() - t_cache) / 86400 < self.max_age:
+                #         all_curr_refs = self.load_bibliography_from_file(doi)
+                #         if all_curr_refs:  # if load query successful
+                #             need_pyblio_func = False
+                #             print("[+] Load REF %d/%d" % (i + 1, len(self.input_doi)))
 
                 # if not exist in db, run the pyblio routine
                 if need_pyblio_func:
                     print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
-                    ab = AbstractRetrieval(doi, view='REF', refresh=True if need_refresh else self.max_age)
+                    rolled_refresh_days = self.min_refresh + random.randint(0, self.max_age - self.min_refresh)
+                    ab = AbstractRetrieval(doi, view='REF', refresh=rolled_refresh_days)
 
                     quota_rem = ab.get_key_remaining_quota()
                     if quota_rem:  # really queried Scopus instead of reading cache
@@ -836,8 +838,8 @@ class CitationGraph:
                     all_curr_refs += ab.references
                     assert len(ab.references) == ab.refcount
 
-                if need_pyblio_func:
-                    self.save_bibliography_to_file(all_curr_refs, doi)
+                # if need_pyblio_func: # keep a record of the ref parsed in my way manually. (not necessary) 2/2
+                #     self.save_bibliography_to_file(all_curr_refs, doi)
 
                 for ref in all_curr_refs:  # build a dict of the works referred.
                     dict_ent = self.curr_refs.get(ref.id)
