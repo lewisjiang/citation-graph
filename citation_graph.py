@@ -10,10 +10,11 @@ import csv
 import datetime
 import random
 
-import threading
 import requests
 import pyperclip
 from bs4 import BeautifulSoup
+import queue
+import multiprocessing as mp
 
 
 # Abstract Retrieval, 10,000 per week, 9 per sec.
@@ -38,15 +39,16 @@ class CitationGraph:
             self.link = ""
             self.updated = ""
 
-    def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_refresh=7):
+    def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_refresh=7, num_proc=1):
         if ignore_lst is None:
             ignore_lst = []
         assert max_age >= 7 and max_age >= min_refresh
         self.max_age = max_age  # manually increase age when the internet is not available and you want to read old data
         self.min_refresh = min_refresh  # if a record \in [min_ref, max_age], it has a chance to be updated in a query
+        self.num_proc = num_proc  # number of parallel processes
         self.curr_refs = dict()  # entry: ref.id: [Reference, (local_id_ref_pos)_set]
 
-        self.input_doi = []
+        self.input_doi = []  # identifiers, not necessarily DOI
         for doi in doi_lst:
             self.input_doi.append(doi.strip())  # lower creates a new profile, but the online query is case insensitive.
         self.input_scopus_id = set()
@@ -60,7 +62,7 @@ class CitationGraph:
         self.v_full = []
         self.v_ref = []  # list of lists of references
 
-        self.fail_set = set()  # failed doi
+        self.fail_set = set()  # failed id
 
         # change accordingly when the corresponding part in pybliometrics changes
         # as of v3.5.1
@@ -70,7 +72,6 @@ class CitationGraph:
         self.OldRefTup = namedtuple('Reference', fields)
 
         self.cache_ref_dir = os.path.join(BASE_PATH, "my_parsed_bib_cache")
-        os.makedirs(self.cache_ref_dir, exist_ok=True)
 
     @staticmethod
     def create_obsidian_note_from_full(uom, md_dir, topic):
@@ -688,6 +689,7 @@ class CitationGraph:
 
         cache_name = q_id.replace('/', '_') + ".csv"
         cache_path = os.path.join(self.cache_ref_dir, cache_name)
+        os.makedirs(self.cache_ref_dir, exist_ok=True)
 
         with open(cache_path, 'w', newline='', encoding="utf-8") as csvfile:
             csvw = csv.writer(csvfile, delimiter=';', quotechar='\"', quoting=csv.QUOTE_MINIMAL)
@@ -765,19 +767,143 @@ class CitationGraph:
                     self.print_one_bib_entry(fmt, self.v_ref[ii][pos - 1])
             time.sleep(0.5)
 
-    def get_bibliography_info(self):
-        # query FULL data
+    @staticmethod
+    def get_bib_entry_worker(q_id, q_fail, sig, refresh_days=99, proc_id=0):
+        """
+        Query using items from the queue of ids, and save the result to the queue of results
+        :param q_id: (item_id)
+        :param q_fail: (item_id), or None if success.
+        :param sig:
+        :param refresh_days:
+        :param proc_id:
+        :return:
+        """
+
+        cnt_total = 0
+        cnt_quota = 0
+        while True:
+            res = [None] * 3  # temp result holder, will be appended to q_res as tuple (scopus_id, v_full, v_ref)
+            try:
+                itm_rem = q_id.qsize()
+                iid = q_id.get(block=True, timeout=1)
+                print("[+] Remaining: %d" % itm_rem)
+            except queue.Empty:
+                if q_id.empty():  # failure to get() does not mean the queue is empty, weird
+                    print("[!] Queue is empty!")
+                    break
+                else:
+                    continue
+
+            try:
+                print("[+] Querying FULL %s" % iid)
+                ab = AbstractRetrieval(iid, view='FULL', refresh=refresh_days)
+                quota_rem = ab.get_key_remaining_quota()
+                if quota_rem:
+                    cnt_quota += 1
+                    print("[+] Remaining quota: %s " % quota_rem)
+                res[0] = ab.eid[7:]
+                res[1] = ab
+            except Scopus404Error as e1:
+                print(" !  FULL view of DOI: ", iid, "cannot be found!")
+            except Exception as e:
+                print(" !  Unhandled exception:", e)
+
+            try:
+                if res[1] is None:
+                    raise ValueError("FULL view already failed.")
+                print("[+] Query REF %s" % iid)
+                ab = AbstractRetrieval(iid, view='REF', refresh=refresh_days)
+                quota_rem = ab.get_key_remaining_quota()
+                if quota_rem:
+                    cnt_quota += 1
+                    print("[+] Remaining quota: %s " % quota_rem)
+                if not ab.references:
+                    raise ValueError(" !  Empty references!")
+                assert len(ab.references) == ab.refcount
+                res[2] = ab.references
+            except Scopus404Error as e1:
+                print(" !  REF view of DOI: ", iid, "cannot be found!")
+            except ValueError as e2:
+                print(" !  REF view of DOI: ", iid, e2)
+            finally:
+                if res[1] is None or res[2] is None:
+                    q_fail.put(iid)
+                else:
+                    q_fail.put(None)  # placeholder for success
+                cnt_total += 1
+
+        print("[+] Process #%d finished. %d items processed, %d quota used." % (proc_id, cnt_total, cnt_quota))
+        with sig.get_lock():
+            sig.value += 1
+
+    def get_bibliography_info_parallel(self):
+        """
+        A brilliant way to bypass the limitation of the inability of pickling pybliometrics objects during
+        multiprocessing, using the caching system of pybliometrics.
+        :return:
+        """
+        q_id = mp.Queue()
+        q_fail = mp.Queue()
+        fin_sig = mp.Value('i', 0)
+        procs = []
+
+        for iid in self.input_doi:
+            q_id.put(iid)
+
+        for i in range(self.num_proc):
+            rolled_refresh_days = random.randint(self.min_refresh, self.max_age)
+            p = mp.Process(target=self.get_bib_entry_worker, args=(q_id, q_fail, fin_sig, rolled_refresh_days, i,))
+            procs.append(p)
+
+        for p in procs:
+            p.start()
+
+        # wait till finished, then we start to harvest the results
+        while fin_sig.value < self.num_proc:
+            time.sleep(0.1)
+        assert q_fail.qsize() == len(self.input_doi)  # this is certain and reliable since all the processes are done
+
+        # empty the queue otherwise the main process will be blocked
+        lst_res = []
+        while len(lst_res) < len(self.input_doi):
+            # time.sleep(0.01)  # q_res.qsize() and q_res.empty() are not reliable. Is q_res.get() reliable?
+            # print(q_fail.qsize(), q_fail.empty())
+            lst_res.append(q_fail.get())
+
+        # print(q_fail.qsize(), q_fail.empty())
+
+        print(len(lst_res))
+        print("[+] All processes finished...")
+        for p in procs:
+            p.join()
+        print("[+] All processes joined.")
+
+        print("#" * 32 + " Funnel into the main process")
+
+        # find the failed ones and add to the fail set
+        for res in lst_res:
+            if res:
+                self.fail_set.add(res)
+
+        # use the single process method to get the references by reading the cache
+        CitationGraph.get_bibliography_info(self, refresh_offset=999)
+
+    def get_bibliography_info(self, refresh_offset=0):
         for i, doi in enumerate(self.input_doi):
+            rolled_refresh_days = random.randint(self.min_refresh, self.max_age) + refresh_offset
+
+            # query FULL data
             try:
                 print("[+] Query FULL %d/%d" % (i + 1, len(self.input_doi)))
-                rolled_refresh_days = self.min_refresh + random.randint(0, self.max_age - self.min_refresh)
+
+                if doi in self.fail_set:
+                    raise ValueError("In fail set, skipped.")
+
                 ab = AbstractRetrieval(doi, view='FULL', refresh=rolled_refresh_days)
                 quota_rem = ab.get_key_remaining_quota()
 
                 if quota_rem:  # really queried Scopus instead of reading cache
                     print("[+] Remaining quota: %s " % quota_rem)
-                else:  # reading the cache, then we need to force query if its life is longer than xxx
-                    pass
 
                 self.v_full.append(ab)
                 self.input_scopus_id.add(ab.eid[7:])
@@ -786,60 +912,37 @@ class CitationGraph:
                 print(" !  FULL view of DOI: ", doi, "cannot be found!")
                 self.fail_set.add(doi)
                 self.v_full.append(None)
+            except ValueError as e2:
+                print(" !  FULL view of DOI: ", doi, e2)
+                self.fail_set.add(doi)
+                self.v_full.append(None)
             except Exception as e:
                 print(" !  Unhandled exception:", e)
                 self.fail_set.add(doi)
                 self.v_full.append(None)
 
-        # query REF data
-        # # check cache
-        cached_ref_names = set()
-        for curr_root, dirs, files in os.walk(self.cache_ref_dir):
-            for file in files:
-                cached_ref_names.add(file.replace('/', '_'))
-
-        # # query
-        for i, doi in enumerate(self.input_doi):
+            # query REF data
             try:
                 all_curr_refs = []
                 # Outdated as of pybliometrics v4.1
                 # start_ref = 1  # start at 1, but give a 0 is ok (still fetches first 40 references)
-                need_pyblio_func = True
 
                 # test if corresponding FULL is successful
                 if doi in self.fail_set:
                     raise ValueError("FULL view already failed.")
 
-                # # try to read from db # keep a record of the ref parsed in my way manually. (not necessary) 1/2
-                # need_refresh = False
-                # f_name = doi.replace('/', '_') + ".csv"
-                # if f_name in cached_ref_names:
-                #     t_cache = os.path.getmtime(os.path.join(self.cache_ref_dir, f_name))
-                #     # The official "REF" file may have expired. But the issue should be minor:
-                #     if (time.time() - t_cache) / 86400 < self.max_age:
-                #         all_curr_refs = self.load_bibliography_from_file(doi)
-                #         if all_curr_refs:  # if load query successful
-                #             need_pyblio_func = False
-                #             print("[+] Load REF %d/%d" % (i + 1, len(self.input_doi)))
+                print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
+                ab = AbstractRetrieval(doi, view='REF', refresh=rolled_refresh_days)
 
-                # if not exist in db, run the pyblio routine
-                if need_pyblio_func:
-                    print("[+] Query REF %d/%d" % (i + 1, len(self.input_doi)))
-                    rolled_refresh_days = self.min_refresh + random.randint(0, self.max_age - self.min_refresh)
-                    ab = AbstractRetrieval(doi, view='REF', refresh=rolled_refresh_days)
+                quota_rem = ab.get_key_remaining_quota()
+                if quota_rem:  # really queried Scopus instead of reading cache
+                    print("[+] Remaining quota: %s " % quota_rem)
 
-                    quota_rem = ab.get_key_remaining_quota()
-                    if quota_rem:  # really queried Scopus instead of reading cache
-                        print("[+] Remaining quota: %s " % quota_rem)
+                if not ab.references:
+                    raise ValueError(" !  Empty references!")
 
-                    if not ab.references:
-                        raise ValueError(" !  Empty references!")
-
-                    all_curr_refs += ab.references
-                    assert len(ab.references) == ab.refcount
-
-                # if need_pyblio_func: # keep a record of the ref parsed in my way manually. (not necessary) 2/2
-                #     self.save_bibliography_to_file(all_curr_refs, doi)
+                all_curr_refs += ab.references
+                assert len(ab.references) == ab.refcount
 
                 for ref in all_curr_refs:  # build a dict of the works referred.
                     dict_ent = self.curr_refs.get(ref.id)
@@ -886,8 +989,9 @@ def update_cite_count_in_md(md_dir):
             if fdoi.strip().strip("\"'"):
                 md_dois.append(fdoi.strip().strip("\"'"))
 
-    cg1 = CitationGraph(md_dois)
-    cg1.get_bibliography_info()
+    cg1 = CitationGraph(md_dois, num_proc=4)
+    # cg1.get_bibliography_info()
+    cg1.get_bibliography_info_parallel()
 
     cg1.update_md_citecount(md_dir)
 
@@ -944,8 +1048,9 @@ if __name__ == "__main__":
 
     ################################
     # use case a. Normal query
-    cg = CitationGraph(dois, ignored)
-    cg.get_bibliography_info()
+    cg = CitationGraph(dois, ignored, num_proc=4)
+    # cg.get_bibliography_info()
+    cg.get_bibliography_info_parallel()
 
     cg.print_curr_papers(md_dir=obsidian_tmp_dir, topic=group_topic)
     # cg.print_curr_papers(topic=group_topic)
