@@ -20,11 +20,10 @@ importance (citations) of a bunch of related papers.
 
 ## How
 
-1. Create developer account at [Scopus/Elsevier](https://www.scopus.com/).
-    1. You have 10000 requests/week as a free user.
-2. Install [pybliometrics](https://github.com/pybliometrics-dev/pybliometrics).
-3. Make sure your institution has bought the database.
-4. Edit and run the script in your institution network.
+1. Make sure your institution has bought the database.
+2. Create a developer account at [Scopus/Elsevier](https://www.scopus.com/). You have 10000 requests/week as a free user.
+3. Install [pybliometrics](https://github.com/pybliometrics-dev/pybliometrics).
+4. Fill `./config/defaut_config.yaml` according to the instructions and run `run_citation_graph.py` in your institution network.
 
 ## Sample output
 

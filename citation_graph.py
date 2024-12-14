@@ -40,6 +40,8 @@ class CitationGraph:
             self.updated = ""
 
     def __init__(self, doi_lst, ignore_lst=None, max_age=30, min_refresh=7, num_proc=1):
+        scopus_init()
+
         if ignore_lst is None:
             ignore_lst = []
         assert max_age >= 7 and max_age >= min_refresh
@@ -997,8 +999,6 @@ def update_cite_count_in_md(md_dir):
 
 
 if __name__ == "__main__":
-    scopus_init()
-
     #  obsidian notes' temp folder.
     obsidian_tmp_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tmp")
 
