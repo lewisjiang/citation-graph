@@ -52,7 +52,11 @@ class CitationGraph:
 
         self.input_doi = []  # identifiers, not necessarily DOI
         for doi in doi_lst:
-            self.input_doi.append(doi.strip())  # lower creates a new profile, but the online query is case insensitive.
+            doi_san = doi.strip().upper()
+            if doi_san in self.input_doi:
+                print("[!] Duplicate doi: %s" % doi_san)
+                continue
+            self.input_doi.append(doi_san)  # a new profile, but the online query is case-insensitive.
         self.input_scopus_id = set()
 
         self.ignored_refs = set()  # a set of scopus_id strings that we wish to block
@@ -143,8 +147,7 @@ class CitationGraph:
                             curr_full_title = " ".join(words[1:]).strip("\"'")
 
                     same_id = curr_scopus_id and uom.scopus_id.lower() == curr_scopus_id.lower() \
-                              or curr_doi \
-                              and uom.doi.lower() == curr_doi.lower()
+                              or curr_doi and uom.doi.upper() == curr_doi.upper()
                     if curr_full_title is not None and same_id:
                         break
                 if same_id:
@@ -205,7 +208,7 @@ class CitationGraph:
                                                                         title_wo_html))
 
     @staticmethod
-    def read_val_by_key_from_frontmatter(fpath, key_name):
+    def read_val_by_key_in_frontmatter(fpath, key_name):
         """
         Explicitly parses the frontmatter surrounded by "---" in the beginning of a file
         TODO: parse multiline entries, add early termination by line number
@@ -226,12 +229,65 @@ class CitationGraph:
                     if in_frontmatter:
                         line_seg = line.split(":")
                         if len(line_seg) > 1 and line_seg[0].strip() == key_name.strip():
-                            val = "".join(line_seg[1:]).strip()
+                            val = ":".join(line_seg[1:]).strip()
                             return val
 
             except StopIteration:
                 pass
         return ""
+
+    @staticmethod
+    def set_vals_by_keys_in_frontmatter(fpath, key_vals):
+        """
+        Explicitly parses the frontmatter surrounded by "---" in the beginning of a file. If a key is found, replace its value.
+        Else, append the key-value pair at the end of the frontmatter.
+        :param fpath:
+        :param key_vals: dict of key-value pairs
+        :return:
+        """
+
+        def quoted_equal(str1, str2):
+            return str1.strip().strip("\"'") == str2.strip().strip("\"'")
+
+        modified = False
+        with open(fpath, "r+", encoding="utf-8") as rec:
+            in_frontmatter = False
+            lines = []
+            un_used_keys = set(key_vals.keys())
+            try:
+                while True:
+                    line = next(rec)
+                    if line.rstrip() == "---":
+                        if not in_frontmatter:
+                            in_frontmatter = True
+                        else:
+                            in_frontmatter = False
+                            for kk in un_used_keys:
+                                lines.append(kk + ": " + key_vals[kk] + "\n")
+                                print(" +  Appending key val: %s" % lines[-1].strip())
+                                modified = True
+
+                    if in_frontmatter:
+                        line_seg = line.split(":")
+                        if len(line_seg) > 1:
+                            key = line_seg[0].strip()
+                            if key in key_vals:
+                                s_val = str(key_vals[key]).strip()
+                                old_val = ":".join(line_seg[1:]).strip()
+                                if not quoted_equal(old_val, s_val):
+                                    line = key + ": " + s_val + "\n"
+                                    print(" +  Updating %s: %s --> %s" % (key, old_val, s_val))
+                                    modified = True
+                                un_used_keys.remove(key)
+                    lines.append(line)
+
+            except StopIteration:  # end of file
+                if modified:
+                    rec.seek(0)
+                    rec.writelines(lines)
+                    rec.truncate()
+
+        return modified
 
     @staticmethod
     def create_obsidian_notes_from_dois(all_dois, md_dir, topic, skip_by_doi=True):
@@ -266,13 +322,13 @@ class CitationGraph:
         if skip_by_doi:
             for root, dirs, files in os.walk(md_dir):
                 for fname in files:
-                    curr_doi = CitationGraph.read_val_by_key_from_frontmatter(os.path.join(root, fname), "doi")
+                    curr_doi = CitationGraph.read_val_by_key_in_frontmatter(os.path.join(root, fname), "doi")
                     if curr_doi:
-                        existing_dois[curr_doi.lower().strip().strip("\"'")] = fname
+                        existing_dois[curr_doi.upper().strip().strip("\"'")] = fname
 
         for doi in all_dois:
             if skip_by_doi:
-                q_res = existing_dois.get(doi.strip().lower())
+                q_res = existing_dois.get(doi.strip().upper())
                 if q_res:
                     print("[-] record of doi %s exists! Skipping: %s" % (doi, str(q_res)))
                     continue
@@ -327,7 +383,7 @@ class CitationGraph:
         if skip_by_aid:
             for root, dirs, files in os.walk(md_dir):
                 for fname in files:
-                    curr_arxiv_link = CitationGraph.read_val_by_key_from_frontmatter(os.path.join(root, fname), "link")
+                    curr_arxiv_link = CitationGraph.read_val_by_key_in_frontmatter(os.path.join(root, fname), "link")
                     match_aid = pat2.search(curr_arxiv_link)
                     if match_aid:
                         existing_aids[match_aid.groups()[0]] = fname
@@ -380,91 +436,61 @@ class CitationGraph:
 
                 CitationGraph.create_obsidian_note_from_full(uom, md_dir, topic)
 
-    @staticmethod
-    def update_obsidian_note_meta_citedby(uom, md_dir):
+    def update_md_metadata(self, md_paths: list):
         """
-        The first file matching the scopus_id will have its citedby count updated or leaf unchanged.
-        :param uom:
-        :param md_dir:
+        With the cache of the files to update already fetched, update the metadata of the files.
+        :param md_paths: the cache of the files to update should already be fetched into the cache
         :return:
         """
-        new_cites = str(uom.citedby_count)
-        for root, dirs, files in os.walk(md_dir):
-            for fname in files:
-                # find the file to update
-                this_file = False
-                with open(os.path.join(md_dir, fname), "r", encoding="utf-8") as rec:
-                    in_frontmatter = False
-                    try:
-                        while True:
-                            line = next(rec)
-                            if line.rstrip() == "---":
-                                if not in_frontmatter:
-                                    in_frontmatter = True
-                                else:
-                                    raise StopIteration
-                            if in_frontmatter:
-                                words = line.strip().split(":")
-                                if len(words) == 2 and \
-                                        (words[0].strip() == "scopus_id" and words[1].strip() == uom.scopus_id or
-                                         words[0].strip() == "doi" and
-                                         words[1].strip().lower().strip("\"'") == uom.doi.lower()):
-                                    this_file = True
-                                    break
 
-                    except StopIteration:
-                        pass
-
-                if this_file:
-                    if uom.scopus_id:
-                        print("[+] Find the file of scopus_id:\"%s\" to update cite count." % uom.scopus_id)
-                    elif uom.doi:
-                        print("[+] Find the file of doi:\"%s\" to update cite count." % uom.doi)
-                    with open(os.path.join(md_dir, fname), "r+", encoding="utf-8") as rec:
-                        lines = rec.readlines()
-                        is_beg = False
-                        is_fin = False
-                        pat_front_mat = re.compile("^---\s*")
-                        for i, line in enumerate(lines):
-                            if is_fin:
-                                break
-                            mat_fm = pat_front_mat.match(line)
-                            if mat_fm and is_beg:
-                                is_fin = True
-                            if mat_fm and not is_beg:
-                                is_beg = True
-                            if not is_beg:
-                                continue
-
-                            words = line.strip().split(":")
-                            if len(words) > 0 and words[0].strip() == "citedby":
-                                if len(words) > 1 and words[1].strip() == new_cites:
-                                    print("[+] cite count unchanged")
-                                else:
-                                    print("[+] %s -> %s" % (words[1].strip() if len(words) > 1 else "NA", new_cites))
-                                    lines[i] = "citedby: " + new_cites + "\n"
-                                    rec.seek(0)
-                                    rec.write("".join(lines))
-                                    rec.truncate()  # default to current pointer pos.
-                                return  # still closes the file
-                            # TODO: update the "updated" field in metadata
-                        print("[-] No \"citedby\" key found in this file.")
-
-    def update_md_citecount(self, md_dir):
-        """
-        It is a little stupid to update from the input dois instead of the whole folder. But this process pipeline is
-        more robust. Use another function to find all the dois in the files in a folder
-        :param md_dir:
-        :return:
-        """
-        os.makedirs(md_dir, exist_ok=True)
+        doi_dict = dict()
+        sco_dict = dict()
         for i, full in enumerate(self.v_full):
             if full:
                 uom = CitationGraph.UnifiedObsMetadata()
                 uom.scopus_id = full.eid[7:] if full.eid else ""
                 uom.citedby_count = full.citedby_count
                 uom.doi = full.doi or ""
-                CitationGraph.update_obsidian_note_meta_citedby(uom, md_dir)
+                uom.year = full.coverDate[:4] if full.coverDate else ""
+                uom.sourcetitle_abbr = full.sourcetitle_abbreviation
+
+                doi_dict[uom.doi.upper()] = uom
+                sco_dict[uom.scopus_id] = uom
+
+        for i, md_path in enumerate(md_paths):
+            print("[+] Processing %d/%d: %s" % (i + 1, len(md_paths), os.path.basename(md_path)))
+
+            doi = CitationGraph.read_val_by_key_in_frontmatter(md_path, "doi").upper()
+            scopus_id = CitationGraph.read_val_by_key_in_frontmatter(md_path, "scopus_id").upper()
+
+            update_time = datetime.datetime.now().strftime('\"%Y-%m-%d %H:%M:%S\"')
+
+            if doi in doi_dict:
+                update_dict = dict()
+                updated_uom = doi_dict[doi]
+                update_dict["citedby"] = updated_uom.citedby_count
+                update_dict["year"] = updated_uom.year
+                update_dict["venue"] = updated_uom.sourcetitle_abbr
+                update_dict["scopus_id"] = updated_uom.scopus_id
+
+                modified = CitationGraph.set_vals_by_keys_in_frontmatter(md_path, update_dict)
+                if modified:
+                    CitationGraph.set_vals_by_keys_in_frontmatter(md_path, {"updated": update_time})
+
+            elif scopus_id in sco_dict:
+                update_dict = dict()
+                updated_uom = sco_dict[scopus_id]
+                update_dict["citedby"] = updated_uom.citedby_count
+                update_dict["year"] = updated_uom.year
+                update_dict["venue"] = updated_uom.sourcetitle_abbr
+                update_dict["doi"] = updated_uom.doi
+
+                modified = CitationGraph.set_vals_by_keys_in_frontmatter(md_path, update_dict)
+                if modified:
+                    CitationGraph.set_vals_by_keys_in_frontmatter(md_path, {"updated": update_time})
+
+            else:
+                print("[-] No match found for doi/scopus_id in the database: %s" % md_path)
 
     def print_curr_papers(self, md_dir="", topic=""):
         """
@@ -977,25 +1003,36 @@ class CitationGraph:
         print()
 
 
-def update_cite_count_in_md(md_dir):
+def update_md_metadata(md_dir):
     """
-    TODO: construct queries from either doi or scopus id
+    Given a directory of markdown files, update the "citedby" field in the frontmatter of the files. If the scopus_id
+    field is empty, also try to update it together with authors, venue and year. Set the updated field to the current.
     :param md_dir:
     :return:
     """
 
     md_dois = []
+    md_paths = []
     for root, dirs, files in os.walk(md_dir):
         for fname in files:
-            fdoi = CitationGraph.read_val_by_key_from_frontmatter(os.path.join(root, fname), "doi")
+            fpa = os.path.join(root, fname)
+            fdoi = CitationGraph.read_val_by_key_in_frontmatter(fpa, "doi")
             if fdoi.strip().strip("\"'"):
                 md_dois.append(fdoi.strip().strip("\"'"))
+                md_paths.append(fpa)
+            else:
+                f_scopus_id = CitationGraph.read_val_by_key_in_frontmatter(fpa, "scopus_id")
+                if f_scopus_id.strip().strip("\"'"):
+                    md_dois.append(f_scopus_id.strip().strip("\"'"))
+                    md_paths.append(fpa)
 
-    cg1 = CitationGraph(md_dois, num_proc=4)
+    print("[+] Found %d files that can be possibly updated." % len(md_paths))
+
+    cg1 = CitationGraph(md_dois, num_proc=min(4, len(md_dois)))
     # cg1.get_bibliography_info()
-    cg1.get_bibliography_info_parallel()
+    cg1.get_bibliography_info_parallel()  # query in advance to fill the cache
 
-    cg1.update_md_citecount(md_dir)
+    cg1.update_md_metadata(md_paths)
 
 
 if __name__ == "__main__":
@@ -1064,7 +1101,7 @@ if __name__ == "__main__":
     # use case b. update cite count
     # copy obsidian notes to 'obs_tuc' if you want to update "citedby"
     to_update_cite_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tuc")
-    update_cite_count_in_md(to_update_cite_dir)
+    update_md_metadata(to_update_cite_dir)
 
     # ################################
     # use case c. Generate paper note template from DOI (no cross referencing)

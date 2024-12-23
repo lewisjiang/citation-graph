@@ -28,9 +28,9 @@ if __name__ == '__main__':
 
     ################################
     # use case b. update cite count
-    # copy obsidian notes to 'obs_tuc' if you want to update "citedby"
+    # copy obsidian notes to 'obs_tuc' if you want to update "citedby", and add "scopus_id" in the frontmatter
     to_update_cite_dir = os.path.join(os.path.split(os.path.realpath(__file__))[0], "obs_tuc")
-    update_cite_count_in_md(to_update_cite_dir)
+    update_md_metadata(to_update_cite_dir)
 
     # ################################
     # use case c. Generate paper note template from DOI (no cross referencing)
