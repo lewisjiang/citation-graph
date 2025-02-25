@@ -199,9 +199,10 @@ class CitationGraph:
             fields = ["followers::\nsource_code::",
                       "## Overview\nkeynovelty::\n\n",
                       "### Concise remarks",
+                      "### Inspirations",
                       "## Contribution/Problems solved", "## Past/Related works",
                       "## Main methods",
-                      "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2023-12-08
+                      "## My focus", "## Doubts", "## Misc"]  # current obsidian format: 2025-02-25
             for fie in fields:
                 f.write(fie + "\n\n")
             print("[+] Paper \"%s\" Obsidian record created: \"%s\"" % (uom.scopus_id if uom.scopus_id else uom.doi,
