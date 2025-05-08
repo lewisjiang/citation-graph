@@ -1,4 +1,4 @@
-from citation_graph import CitationGraph, update_cite_count_in_md
+from citation_graph import CitationGraph, update_md_metadata
 import os
 import yaml
 
